@@ -9,6 +9,7 @@ import {
   formatRuWeekdayDateRange,
 } from "@/domain/dateTime";
 import { formatDeadlineDateTime } from "@/domain/deadlineSemantics";
+import { formatRuPlural } from "@/lib/ruPlural";
 import { isEventLikePlannerItem } from "@/domain/eventReminderSemantics";
 import {
   formatHumanReminderPolicy,
@@ -293,8 +294,10 @@ export function formatReminderMessage(
     const occurrence = DateTime.fromJSDate(reminder.scheduledAt, { zone: "utc" })
       .setZone(timezone)
       .toFormat("ccc, dd.LL HH:mm");
-    return rule
-      ? `Напоминание: ${item.title}\n${occurrence}. Правило: ${rule}.`
+    if (rule) return `Напоминание: ${item.title}\n${occurrence}. Правило: ${rule}.`;
+    const overdue = formatOverdueLine(item, nowLocal);
+    return overdue
+      ? `Напоминание: ${item.title}\n${overdue}\n\nСделано — отметь кнопкой. Не успеваешь сейчас — отложи кнопкой, я напомню снова.`
       : `Повторяющееся напоминание: ${item.title}\n${when}\n\nНажми кнопку, чтобы я понял, что делать дальше.`;
   }
   if (reminder.type === "followup") {
@@ -310,6 +313,17 @@ export function formatReminderMessage(
     return `Проверка задачи: ${item.title}\nСрок был: ${when}`;
   }
   return `Напоминание: ${item.title}\n${when}`;
+}
+
+// "Срок был Вс, 20.09 23:59 — просрочено на 5 дней" instead of repeating a stale date as if current.
+function formatOverdueLine(item: PlannerItem, nowLocal: DateTime) {
+  const anchor = item.dueAt ?? item.endAt ?? item.startAt;
+  if (!anchor || anchor.getTime() >= nowLocal.toMillis()) return null;
+  const anchorLocal = DateTime.fromJSDate(anchor, { zone: "utc" }).setZone(nowLocal.zone);
+  const days = Math.floor(nowLocal.startOf("day").diff(anchorLocal.startOf("day"), "days").days);
+  if (days < 1) return null;
+  const date = formatRuWeekdayDateRange(item.dueAt ?? item.startAt, null, item.timezone);
+  return `Срок был ${date} — просрочено на ${formatRuPlural(days, ["день", "дня", "дней"])}.`;
 }
 
 function formatOpenEndedNagInterval(intervalMinutes: number | null) {

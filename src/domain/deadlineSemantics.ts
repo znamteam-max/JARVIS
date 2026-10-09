@@ -56,6 +56,10 @@ export function parseDeadlineSemantics(params: {
     baseDate: scheduleBase,
   });
   if (!parsed) return null;
+  // "дедлайн до завтра" names a day, not 08:00: a deadline without a clock means end of that day.
+  if (parsed.warnings.includes("time_missing_default_08_00")) {
+    parsed = { ...parsed, local: parsed.local.set({ hour: 23, minute: 59 }) };
+  }
 
   const nowLocal = DateTime.fromJSDate(params.now ?? new Date(), { zone: "utc" }).setZone(
     params.timezone,

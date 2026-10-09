@@ -48,3 +48,46 @@ describe("V3.0.9 Russian dates from the 25.09–09.10 journal", () => {
     }
   });
 });
+
+describe("V3.0.9 scheduled creation titles from the journal", () => {
+  it.each([
+    [
+      "В четверг в 11.00 прямой эфир Централ Парк про триатлон",
+      "Прямой эфир Централ Парк про триатлон",
+      "2026-10-08 11:00",
+    ],
+    ["Завтра в 13.00 созвон по Централ Парк", "Созвон по Централ Парк", "2026-10-06 13:00"],
+    ["Созвон по СММ на НХЛ 27 октября в 14.00", "Созвон по СММ на НХЛ", "2026-10-27 14:00"],
+  ])("%s", async (text, title, start) => {
+    const { parseScheduledCreationIntent } = await import("@/domain/scheduledCreationIntent");
+    const intent = parseScheduledCreationIntent({
+      text,
+      timezone,
+      now: new Date("2026-10-05T10:44:50.000Z"),
+    });
+    expect(intent?.title).toBe(title);
+    expect(intent?.startLocal.slice(0, 16).replace("T", " ")).toBe(start);
+  });
+});
+
+describe("V3.0.9 deadline without a clock", () => {
+  it.each([
+    [
+      "Сделать видео с Сэмом, дедлайн до завтра",
+      "2026-10-08T12:26:24.000Z",
+      "2026-10-09 23:59",
+      "Сделать видео с Сэмом",
+    ],
+    [
+      "Составить топ-30 игроков НБА, дедлайн 23.30 в воскресенье 4 октября",
+      "2026-10-03T09:03:05.000Z",
+      "2026-10-04 23:30",
+      "Составить топ-30 игроков НБА",
+    ],
+  ])("%s", async (text, sentAt, due, title) => {
+    const { parseDeadlineSemantics } = await import("@/domain/deadlineSemantics");
+    const parsed = parseDeadlineSemantics({ text, timezone, now: new Date(sentAt) });
+    expect(parsed?.dueLocal.toFormat("yyyy-LL-dd HH:mm")).toBe(due);
+    expect(parsed?.title).toBe(title);
+  });
+});

@@ -304,7 +304,10 @@ async function sendReminder(
     );
     const from = nowLocal.startOf("day").toUTC().toJSDate();
     const to = nowLocal.endOf("day").toUTC().toJSDate();
-    const tasks = await listEveningReviewItems({ userId: user.id, from, to, limit: 80 });
+    // Meetings already get their own post-event card; the evening check is for open tasks.
+    const tasks = (await listEveningReviewItems({ userId: user.id, from, to, limit: 80 })).filter(
+      (item) => !isEventLikePlannerItem(item),
+    );
     await ensureDailySnapshot({
       userId: user.id,
       timezone: user.timezone,

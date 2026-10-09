@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   advancePolicyAfterDelivery: vi.fn(),
   recordPendingPromptRenag: vi.fn(),
   runDuePendingPromptRenags: vi.fn(),
+  listEveningReviewItems: vi.fn(),
 }));
 
 vi.mock("@/db/queries/reminders", () => ({
@@ -20,11 +21,14 @@ vi.mock("@/db/queries/reminders", () => ({
   recordReminderDelivery: vi.fn(),
   archiveDeliveredTestItem: vi.fn(),
 }));
-vi.mock("@/db/queries/users", () => ({ getUserById: mocks.getUserById, listUsers: vi.fn().mockResolvedValue([]) }));
+vi.mock("@/db/queries/users", () => ({
+  getUserById: mocks.getUserById,
+  listUsers: vi.fn().mockResolvedValue([]),
+}));
 vi.mock("@/db/queries/items", () => ({
   getPlannerItemByAnyId: mocks.getPlannerItemByAnyId,
   listDailyDigestItems: vi.fn().mockResolvedValue([]),
-  listEveningReviewItems: vi.fn().mockResolvedValue([]),
+  listEveningReviewItems: mocks.listEveningReviewItems,
   listYesterdayCarryCandidates: vi.fn().mockResolvedValue([]),
 }));
 vi.mock("@/db/queries/reminderPolicies", () => ({
@@ -52,6 +56,7 @@ vi.mock("@/services/pendingPromptRenag", () => ({
   recordPendingPromptRenag: mocks.recordPendingPromptRenag,
   runDuePendingPromptRenags: mocks.runDuePendingPromptRenags,
 }));
+vi.mock("@/services/dailyHistory", () => ({ ensureDailySnapshot: vi.fn() }));
 vi.mock("@/agent/state/taskViewState", () => ({
   rememberTaskView: vi.fn().mockResolvedValue({ id: "view-id" }),
 }));
@@ -128,6 +133,7 @@ describe("V3.0.9 reminder noise: re-nag only when nothing else will follow", () 
     mocks.advancePolicyAfterDelivery.mockResolvedValue(null);
     mocks.recordPendingPromptRenag.mockResolvedValue({ id: "renag-id" });
     mocks.runDuePendingPromptRenags.mockResolvedValue({ checked: 0, sent: 0, cancelled: 0 });
+    mocks.listEveningReviewItems.mockResolvedValue([]);
   });
 
   it("does not stack 5-minute re-nags when the policy has its own next reminder", async () => {
@@ -165,5 +171,83 @@ describe("V3.0.9 reminder noise: re-nag only when nothing else will follow", () 
     await runDueReminders({ now, sender });
 
     expect(mocks.recordPendingPromptRenag).toHaveBeenCalled();
+  });
+});
+
+describe("V3.0.9 overdue until-done card", () => {
+  it("says how long the task is overdue instead of repeating the stale date", async () => {
+    const { formatReminderMessage } = await import("@/bot/formatters");
+    const text = formatReminderMessage(
+      { ...policyReminder(), policyId: null, repeatUntilAck: true } as never,
+      {
+        id: "item-id",
+        kind: "recurring_task",
+        title: "Записаться на боевое искусство",
+        timezone: "Europe/Moscow",
+        startAt: null,
+        endAt: null,
+        dueAt: new Date("2026-09-20T20:59:00.000Z"),
+        metadata: {},
+      } as never,
+      { now: new Date("2026-09-25T06:30:00.000Z") },
+    );
+
+    expect(text).toContain("Записаться на боевое искусство");
+    expect(text).toContain("Срок был Вс, 20.09 23:59 — просрочено на 5 дней.");
+    expect(text).toContain("отложи кнопкой");
+  });
+});
+
+describe("V3.0.9 evening check", () => {
+  it("lists open tasks but not meetings that already happened", async () => {
+    vi.clearAllMocks();
+    const evening = new Date("2026-10-08T15:00:00.000Z");
+    mocks.getUserById.mockResolvedValue({
+      id: "user-id",
+      telegramUserId: 52203584n,
+      timezone: "Europe/Moscow",
+    });
+    mocks.isReminderStillDeliverable.mockResolvedValue(true);
+    mocks.runDuePendingPromptRenags.mockResolvedValue({ checked: 0, sent: 0, cancelled: 0 });
+    mocks.claimDueReminders.mockResolvedValue([
+      {
+        ...policyReminder(),
+        policyId: null,
+        plannerItemId: null,
+        type: "evening_checkin",
+        scheduledAt: evening,
+      },
+    ]);
+    mocks.listEveningReviewItems.mockResolvedValue([
+      {
+        id: "event-id",
+        kind: "event",
+        status: "active",
+        title: "Прямой эфир Централ Парк про триатлон",
+        timezone: "Europe/Moscow",
+        startAt: new Date("2026-10-08T08:00:00.000Z"),
+        endAt: new Date("2026-10-08T09:00:00.000Z"),
+        dueAt: null,
+        metadata: {},
+      },
+      {
+        id: "task-id",
+        kind: "task",
+        status: "active",
+        title: "Сделать видео с Сэмом",
+        timezone: "Europe/Moscow",
+        startAt: null,
+        endAt: null,
+        dueAt: new Date("2026-10-08T20:00:00.000Z"),
+        metadata: {},
+      },
+    ]);
+    const sender = { sendMessage: vi.fn().mockResolvedValue({ message_id: 6584 }) };
+
+    await runDueReminders({ now: evening, sender });
+
+    const text = String(sender.sendMessage.mock.calls[0]?.[1]);
+    expect(text).toContain("Сделать видео с Сэмом");
+    expect(text).not.toContain("Централ Парк");
   });
 });
