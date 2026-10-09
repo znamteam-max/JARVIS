@@ -27,6 +27,7 @@ const envSchema = z.object({
     .default("auto_low_risk"),
   DEFAULT_MORNING_REMINDER_TIME: z.string().default("09:30"),
   CRON_SECRET: z.string().optional(),
+  OPS_WATCHDOG_SECRET: z.string().optional(),
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   GOOGLE_REDIRECT_URI: z.string().url().default("http://localhost:3000/api/google/oauth/callback"),

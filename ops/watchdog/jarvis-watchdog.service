@@ -1,0 +1,16 @@
+[Unit]
+Description=JARVIS external watchdog (health, reminder runner, Telegram webhook)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=jarvisops
+Group=jarvisops
+Environment=JARVIS_OPS_DIR=/opt/jarvis-ops
+ExecStart=/usr/bin/python3 -I /opt/jarvis-ops/bin/jarvis_watchdog.py
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/jarvis-ops/state
+PrivateTmp=yes
