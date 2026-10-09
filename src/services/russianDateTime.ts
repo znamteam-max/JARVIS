@@ -93,10 +93,14 @@ export function parseRussianDateTime(params: {
   const nowLocal = DateTime.fromJSDate(params.now ?? new Date(), { zone: "utc" }).setZone(timezone);
   const text = normalizeRussian(params.text);
   const textWithoutQuotes = stripQuotedText(text);
-  const explicitDate = parseExplicitDate(textWithoutQuotes, nowLocal);
+  const namedDate = parseNamedMonthDate(textWithoutQuotes, nowLocal);
+  const explicitDate = namedDate?.date ?? parseExplicitDate(textWithoutQuotes, nowLocal);
   const relative = parseRelativeDay(textWithoutQuotes, nowLocal);
   const weekday = parseWeekday(textWithoutQuotes);
-  const time = parseClockTime(textWithoutQuotes);
+  // With "27 октября" already naming the date, "18.10" can only be a clock time.
+  const time = parseClockTime(namedDate ? namedDate.rest : textWithoutQuotes, {
+    dottedTokensAreClock: Boolean(namedDate),
+  });
   const warnings: string[] = [];
 
   if (!explicitDate && !relative && !weekday && !time) return null;
@@ -220,8 +224,62 @@ function stripQuotedText(text: string) {
   return text.replace(/["\u00ab][^"\u00bb]+["\u00bb]/g, " ");
 }
 
+// Full month words or standard abbreviations only, so "3 марки" or "2 майки" stay plain numbers.
+const MONTH_NAMES: Array<{ pattern: string; month: number }> = [
+  { pattern: "январ[ья]|янв", month: 1 },
+  { pattern: "феврал[ья]|февр?", month: 2 },
+  { pattern: "марта?|мар", month: 3 },
+  { pattern: "апрел[ья]|апр", month: 4 },
+  { pattern: "ма[йя]", month: 5 },
+  { pattern: "июн[ья]|июн", month: 6 },
+  { pattern: "июл[ья]|июл", month: 7 },
+  { pattern: "августа?|авг", month: 8 },
+  { pattern: "сентябр[ья]|сент?", month: 9 },
+  { pattern: "октябр[ья]|окт", month: 10 },
+  { pattern: "ноябр[ья]|нояб?", month: 11 },
+  { pattern: "декабр[ья]|дек", month: 12 },
+];
+
+const NAMED_MONTH_DATE = new RegExp(
+  `(?:^|[^\\d])(\\d{1,2})\\s+(${MONTH_NAMES.map((entry) => entry.pattern).join("|")})\\.?(?:\\s+(\\d{4})(?:\\s*г(?:ода|\\.)?)?)?(?=$|[^${RU_CHARS}a-z\\d])`,
+  "i",
+);
+
+// "27 октября", "27 окт.", "1 мая 2027"; returns the text without the date so its
+// day number is never re-read as an hour ("на 27 октября").
+function parseNamedMonthDate(text: string, nowLocal: DateTime) {
+  const match = text.match(NAMED_MONTH_DATE);
+  if (!match) return null;
+  const monthWord = match[2]!.toLowerCase();
+  const month = MONTH_NAMES.find((entry) =>
+    new RegExp(`^(?:${entry.pattern})$`, "i").test(monthWord),
+  )?.month;
+  if (!month) return null;
+  const day = Number(match[1]);
+  const year = match[3] ? Number(match[3]) : nowLocal.year;
+  let date = DateTime.fromObject({ year, month, day }, { zone: nowLocal.zoneName ?? "utc" });
+  if (!date.isValid) return null;
+  if (!match[3] && date.endOf("day") < nowLocal) date = date.plus({ years: 1 });
+  return { date, rest: text.replace(match[0], " ") };
+}
+
+const CLOCK_PREPOSITION = /(?:^|\s)(?:в|во)\s*$/i;
+
+function isPrepositionedClock(text: string, index: number, hour: string, minute: string) {
+  return (
+    minute.length === 2 &&
+    Number(hour) <= 23 &&
+    Number(minute) <= 59 &&
+    CLOCK_PREPOSITION.test(text.slice(0, index))
+  );
+}
+
 function parseExplicitDate(text: string, nowLocal: DateTime) {
-  const match = text.match(/\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\b/);
+  const match = [...text.matchAll(/\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\b/g)].find(
+    (candidate) =>
+      Boolean(candidate[3]) ||
+      !isPrepositionedClock(text, candidate.index ?? 0, candidate[1]!, candidate[2]!),
+  );
   if (!match) return null;
   const day = Number(match[1]);
   const month = Number(match[2]);
@@ -249,10 +307,13 @@ function parseWeekday(text: string) {
   return null;
 }
 
-function parseClockTime(text: string) {
+function parseClockTime(text: string, options?: { dottedTokensAreClock?: boolean }) {
   const sanitized = text.replace(
-    /\b(\d{1,2})[./-](\d{1,2})(?:[./-]\d{2,4})?\b/g,
-    (match, _day: string, month: string) => {
+    /\b(\d{1,2})[./-](\d{1,2})([./-]\d{2,4})?\b/g,
+    (match, hour: string, month: string, year: string | undefined, offset: number) => {
+      if (!year && (options?.dottedTokensAreClock || isPrepositionedClock(text, offset, hour, month))) {
+        return match;
+      }
       const monthNumber = Number(month);
       return monthNumber >= 1 && monthNumber <= 12 ? " " : match;
     },

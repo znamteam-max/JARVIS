@@ -127,7 +127,20 @@ export async function runDueReminders(params?: {
           status: "sent",
           telegramMessageId: sentMessage.message_id,
         });
-        if (sentMessage.actionRequired && sentMessage.text) {
+        const autoArchivedTest = await archiveTestReminderIfNeeded(reminder);
+        if (!autoArchivedTest) {
+          if (reminder.policyId) {
+            await advancePolicyAfterDelivery(reminder.id, now);
+          } else {
+            await scheduleRepeatUntilAck(reminder, now);
+            await scheduleNextRecurringOccurrence(reminder, now);
+          }
+        }
+        if (
+          sentMessage.actionRequired &&
+          sentMessage.text &&
+          !(await policyWillRemindAgain(reminder, now))
+        ) {
           await recordPendingPromptRenag({
             userId: reminder.userId,
             promptType:
@@ -161,15 +174,6 @@ export async function runDueReminders(params?: {
               relatedItemId: reminder.plannerItemId,
               relatedReminderId: reminder.id,
             });
-          }
-        }
-        const autoArchivedTest = await archiveTestReminderIfNeeded(reminder);
-        if (!autoArchivedTest) {
-          if (reminder.policyId) {
-            await advancePolicyAfterDelivery(reminder.id, now);
-          } else {
-            await scheduleRepeatUntilAck(reminder, now);
-            await scheduleNextRecurringOccurrence(reminder, now);
           }
         }
         if (!params?.sender && !compactDelivery)
@@ -262,7 +266,7 @@ async function sendReminder(
       userId: user.id,
       timezone: user.timezone,
       viewType: "today",
-      title: `Сегодня, ${nowLocal.setLocale("ru").toFormat("d LLLL")}`,
+      title: `Сегодня, ${nowLocal.setLocale("ru").toFormat("d MMMM")}`,
       sections: [
         { title: "На сегодня", items: sortJarvisItemsForDisplay(items) },
         { title: "Со вчера осталось", items: sortJarvisItemsForDisplay(carry) },
@@ -483,6 +487,28 @@ function nextRetryAt(reminder: ClaimedReminder, now: Date): Date | null {
   return new Date(now.getTime() + minutes * 60 * 1000);
 }
 
+// The 5-minute re-nag exists so a one-off reminder is not lost. When the policy
+// already has its own next occurrence, that occurrence is the follow-up; stacking
+// re-nags on top of it ignored the user's interval (e.g. "every 240 minutes").
+async function policyWillRemindAgain(reminder: ClaimedReminder, now: Date) {
+  if (!reminder.policyId) return false;
+  try {
+    const policy = await getReminderPolicyById(reminder.policyId);
+    return Boolean(
+      policy &&
+        policy.status === "active" &&
+        policy.nextFireAt &&
+        policy.nextFireAt.getTime() > now.getTime(),
+    );
+  } catch (error) {
+    logger.warn("Policy follow-up lookup failed; keeping re-nag", {
+      reminderId: reminder.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
+}
+
 async function scheduleRepeatUntilAck(reminder: ClaimedReminder, now: Date) {
   if (!reminder.repeatUntilAck || reminder.ackedAt) return;
   const payload = (reminder.payload ?? {}) as Record<string, unknown>;
@@ -605,6 +631,7 @@ async function refreshReminderDashboardBestEffort(reminder: ClaimedReminder, now
       chatId: user.telegramUserId.toString(),
       timezone: user.timezone,
       now,
+      skipIfUnchanged: true,
     });
   } catch (error) {
     logger.warn("Reminder dashboard refresh failed", {

@@ -38,6 +38,7 @@ export async function syncCompactChat(params: {
     timezone: params.timezone,
     now: params.now,
     api: params.api,
+    skipIfUnchanged: true,
   });
   if (!params.activeReminder) return { dashboard, reminderMessageId: null };
 

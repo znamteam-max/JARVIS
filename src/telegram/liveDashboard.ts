@@ -580,9 +580,16 @@ export async function sendOrRefreshLiveDashboard(params: {
   timezone: string;
   now?: Date;
   api?: LiveDashboardTelegramApi;
+  // Automatic refreshes (reminder delivery, runner) keep the existing card when the
+  // plan text is identical instead of deleting and re-sending it every time.
+  skipIfUnchanged?: boolean;
 }) {
   const api = params.api ?? (getBot().api as unknown as LiveDashboardTelegramApi);
   const previous = await getActiveDashboard(params.userId, params.chatId);
+  const rendered = await renderLiveDashboard(params);
+  if (params.skipIfUnchanged && previous && previous.payload?.text === rendered.text) {
+    return { dashboard: previous, ...rendered, unchanged: true as const };
+  }
   if (previous) {
     try {
       const deleted = await deleteMessageSafe({
@@ -618,7 +625,6 @@ export async function sendOrRefreshLiveDashboard(params: {
     }
   }
 
-  const rendered = await renderLiveDashboard(params);
   const sent = await api.sendMessage(params.chatId, rendered.text, {
     parse_mode: "HTML",
     reply_markup: rendered.keyboard,
@@ -647,7 +653,7 @@ export async function sendOrRefreshLiveDashboard(params: {
     purpose: "dashboard",
     metadata: { dashboardId: dashboard.id },
   });
-  return { dashboard, ...rendered };
+  return { dashboard, ...rendered, unchanged: false as const };
 }
 
 export async function refreshDashboardAfterMutation(params: {
@@ -656,6 +662,7 @@ export async function refreshDashboardAfterMutation(params: {
   timezone: string;
   now?: Date;
   api?: LiveDashboardTelegramApi;
+  skipIfUnchanged?: boolean;
 }) {
   return sendOrRefreshLiveDashboard({
     ...params,

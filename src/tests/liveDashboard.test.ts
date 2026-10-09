@@ -202,6 +202,39 @@ describe("live dashboard lifecycle", () => {
     expect(result.items).toHaveLength(1);
   });
 
+  it("keeps the existing card on an automatic refresh when the plan text is unchanged", async () => {
+    const params = {
+      userId: "user-id",
+      timezone: "Europe/Moscow",
+      now: new Date("2026-06-07T08:00:00.000Z"),
+    };
+    const { text } = await renderLiveDashboard(params);
+    mocks.getActiveDashboard.mockResolvedValue({
+      id: "old-dashboard",
+      messageId: 10,
+      payload: { text },
+    });
+    const api = {
+      sendMessage: vi.fn().mockResolvedValue({ message_id: 11 }),
+      deleteMessage: vi.fn(),
+      editMessageReplyMarkup: vi.fn(),
+    };
+
+    const automatic = await sendOrRefreshLiveDashboard({
+      ...params,
+      chatId: "42",
+      api,
+      skipIfUnchanged: true,
+    });
+    expect(automatic.unchanged).toBe(true);
+    expect(api.sendMessage).not.toHaveBeenCalled();
+    expect(mocks.deleteMessageSafe).not.toHaveBeenCalled();
+
+    const explicit = await sendOrRefreshLiveDashboard({ ...params, chatId: "42", api });
+    expect(explicit.unchanged).toBe(false);
+    expect(api.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
   it("reports legacy reminder-like notes instead of claiming reminders are empty", async () => {
     mocks.listActiveReminderPolicies.mockResolvedValue([]);
     mocks.listLegacyReminderLikeItems.mockResolvedValue([
