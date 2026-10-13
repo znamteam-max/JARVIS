@@ -1365,7 +1365,7 @@ Cloudflare worker status:
 
 ```text
 worker -> personal-assistant-reminder-worker
-url -> https://personal-assistant-reminder-worker.znamteam-903.workers.dev
+url -> https://personal-assistant-reminder-worker.rngn.workers.dev
 manual fetch -> ok: true, claimed: 0, sent: 0, failed: 0
 secrets -> APP_REMINDER_RUN_URL, CRON_SECRET
 schedules -> none
