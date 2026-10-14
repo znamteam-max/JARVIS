@@ -69,7 +69,10 @@ export function normalizeAgentExecutionProposal(params: {
   const sameMessageReminder = normalizeSameMessageEventReminderPolicies({
     ...params,
     execution: temporal.actionPlan
-      ? { ...temporal, actionPlan: normalizeActionPlanEventTime({ ...params, plan: temporal.actionPlan }) }
+      ? {
+          ...temporal,
+          actionPlan: normalizeActionPlanEventTime({ ...params, plan: temporal.actionPlan }),
+        }
       : temporal,
   });
   const clearReminder = normalizeClearReminderIntent({
@@ -1412,6 +1415,18 @@ function normalizeIntervalWindow(params: {
     intervalMinutes,
   });
   if (appointment) return appointment;
+  // "напоминай с 6 до 9 каждый час, дедлайн 10": the window end is not the deadline.
+  const deadlineClock = extractDeadlineClock(params.text);
+  const deadline = deadlineClock
+    ? localDay.set({ ...deadlineClock, second: 0, millisecond: 0 })
+    : null;
+  const explicitDueLocal =
+    deadline && deadline.toFormat("yyyy-MM-dd'T'HH:mm:ss") > startsAtLocal
+      ? deadline.toFormat("yyyy-MM-dd'T'HH:mm:ss")
+      : null;
+  const dueAtLocal = explicitDueLocal ?? endsAtLocal;
+  const windowEndLocal =
+    explicitDueLocal && explicitDueLocal < endsAtLocal ? explicitDueLocal : endsAtLocal;
   const title =
     extractIntervalTaskTitle(params.text) ?? normalizeReminderTaskTitle(params.text, action.title);
   const requireAck =
@@ -1423,7 +1438,7 @@ function normalizeIntervalWindow(params: {
     title,
     startAtLocal: null,
     endAtLocal: null,
-    dueAtLocal: endsAtLocal,
+    dueAtLocal,
     durationMinutes: null,
     reminders: [],
     metadata: {
@@ -1440,7 +1455,7 @@ function normalizeIntervalWindow(params: {
     category: /дрик/i.test(title) ? "people" : requireAck ? "nag_until_done" : "project",
     policyType: useDefaultEnd ? "nag_until_ack" : "interval_window",
     startsAtLocal,
-    endsAtLocal,
+    endsAtLocal: windowEndLocal,
     nextFireAtLocal: startsAtLocal,
     recurrenceRule: null,
     intervalMinutes,
@@ -1621,6 +1636,17 @@ function normalizeAppointmentWithReminderWindow(params: {
     reminderPolicies: [reminderWindow, howDidItGo],
     clarificationQuestions: [],
   };
+}
+
+// "дедлайн 10 утра", "дедлайн в 13.00", "дедлайн до 23.59".
+function extractDeadlineClock(text: string) {
+  const match = text.match(
+    /дедлайн\s+(?:в\s+|до\s+|к\s+)?([01]?\d|2[0-3])(?:[.:]([0-5]\d))?(?:\s*(утра|дня|вечера|ночи))?(?=$|[\s,.;!?])/i,
+  );
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const pm = /^(?:дня|вечера)$/i.test(match[3] ?? "") && hour < 12;
+  return { hour: pm ? hour + 12 : hour, minute: Number(match[2] ?? 0) };
 }
 
 // "в 13.00", "в 13:00", "в 3 дня" before the reminder request; never a reminder time.

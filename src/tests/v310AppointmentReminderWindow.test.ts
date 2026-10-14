@@ -107,11 +107,34 @@ describe("V3.1.0 appointment time with an hourly reminder window", () => {
     ]);
 
     expect(execution.actionPlan?.actions[0]).toEqual(
-      expect.objectContaining({ kind: "task", startAtLocal: null }),
+      expect.objectContaining({
+        kind: "task",
+        startAtLocal: null,
+        dueAtLocal: "2026-10-14T13:00:00",
+      }),
     );
     expect(execution.reminderPolicies.map((policy) => policy.policyType)).toEqual([
       "interval_window",
     ]);
+  });
+
+  it("uses an explicit deadline after the window instead of the window end", () => {
+    // Production 2026-10-14 23:39 MSK: "дедлайн 10 утра" became a 09:00 deadline.
+    const text = "Сдать макет завтра, напоминай с 6 утра до 9 утра каждый час, дедлайн 10 утра";
+    const execution = normalize(text, [
+      action({ actionType: "task", kind: "task", title: "Сдать макет" }),
+    ]);
+
+    expect(execution.actionPlan?.actions[0]).toEqual(
+      expect.objectContaining({ kind: "task", dueAtLocal: "2026-10-14T10:00:00" }),
+    );
+    expect(execution.reminderPolicies[0]).toEqual(
+      expect.objectContaining({
+        policyType: "interval_window",
+        startsAtLocal: "2026-10-14T06:00:00",
+        endsAtLocal: "2026-10-14T09:00:00",
+      }),
+    );
   });
 });
 
