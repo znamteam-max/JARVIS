@@ -83,6 +83,7 @@ export function normalizeAgentExecutionProposal(params: {
   const interval = normalizeIntervalWindow({
     ...params,
     execution: todayUntilDone,
+    aiProposedAction: params.execution.actionPlan?.actions[0] ?? null,
   });
   const recurring = normalizeLongTermRecurrence({
     ...params,
@@ -1369,6 +1370,7 @@ function normalizeIntervalWindow(params: {
   text: string;
   timezone: string;
   now: Date;
+  aiProposedAction?: ActionPlanItem | null;
 }) {
   const intervalMinutes = extractIntervalMinutes(params.text);
   const startHour =
@@ -1399,6 +1401,17 @@ function normalizeIntervalWindow(params: {
     })
     .toFormat("yyyy-MM-dd'T'HH:mm:ss");
   const action = proposedAction ?? buildSyntheticIntervalAction(fallbackTitle!, params.timezone);
+  const appointment = normalizeAppointmentWithReminderWindow({
+    execution: params.execution,
+    text: params.text,
+    action,
+    aiProposedAction: params.aiProposedAction ?? null,
+    localDay,
+    startsAtLocal,
+    endsAtLocal,
+    intervalMinutes,
+  });
+  if (appointment) return appointment;
   const title =
     extractIntervalTaskTitle(params.text) ?? normalizeReminderTaskTitle(params.text, action.title);
   const requireAck =
@@ -1478,6 +1491,163 @@ function normalizeIntervalWindow(params: {
     ],
     clarificationQuestions: [],
   };
+}
+
+const APPOINTMENT_DEADLINE_PATTERN = /дедлайн|срок|сдать|успеть|не\s+позже/i;
+
+// "Завтра в 13.00 фотосессия, напоминай с 8 до 12 каждый час": 13:00 is when it
+// happens, the window only says when to remind. Keep it an event so it never turns
+// "overdue" at the window end, and ask how it went once it is over.
+function normalizeAppointmentWithReminderWindow(params: {
+  execution: AgentExecution;
+  text: string;
+  action: ActionPlanItem;
+  // Earlier normalizations may already have flattened the AI event into a task.
+  aiProposedAction: ActionPlanItem | null;
+  localDay: DateTime;
+  startsAtLocal: string;
+  endsAtLocal: string;
+  intervalMinutes: number;
+}): AgentExecution | null {
+  if (APPOINTMENT_DEADLINE_PATTERN.test(params.text)) return null;
+  const clock = extractAppointmentClock(params.text);
+  if (!clock) return null;
+  const zone = params.localDay.zone;
+  const start = params.localDay.set({
+    hour: clock.hour,
+    minute: clock.minute,
+    second: 0,
+    millisecond: 0,
+  });
+  if (start.toMillis() <= DateTime.fromISO(params.startsAtLocal, { zone }).toMillis()) return null;
+
+  const proposed = params.aiProposedAction ?? params.action;
+  const proposedStart = proposed.startAtLocal
+    ? DateTime.fromISO(proposed.startAtLocal, { zone })
+    : null;
+  const proposedEnd = proposed.endAtLocal ? DateTime.fromISO(proposed.endAtLocal, { zone }) : null;
+  const end =
+    ["event", "training", "tentative_event"].includes(proposed.kind) &&
+    proposedStart?.toMillis() === start.toMillis() &&
+    proposedEnd &&
+    proposedEnd.toMillis() > start.toMillis()
+      ? proposedEnd
+      : start.plus({ minutes: 60 });
+  const configuredWindowEnd = DateTime.fromISO(params.endsAtLocal, { zone });
+  const windowEnd = configuredWindowEnd.toMillis() < start.toMillis() ? configuredWindowEnd : start;
+  const local = (value: DateTime) => value.toFormat("yyyy-MM-dd'T'HH:mm:ss");
+  const title =
+    cleanAppointmentTitle(params.action.title) ??
+    cleanAppointmentTitle(params.text.split(/[,;]|напомин|напомн/i)[0] ?? "") ??
+    params.action.title;
+  const metadata: Record<string, unknown> = { ...(params.action.metadata ?? {}) };
+  delete metadata.intervalPolicyExpected;
+  delete metadata.defaultEndAssumed;
+
+  const event: ActionPlanItem = {
+    ...params.action,
+    actionType: "event",
+    kind: "event",
+    title,
+    startAtLocal: local(start),
+    endAtLocal: local(end),
+    dueAtLocal: null,
+    durationMinutes: Math.round(end.diff(start, "minutes").minutes),
+    reminders: [],
+    metadata: {
+      ...metadata,
+      appointmentReminderWindow: true,
+      sourceNormalization: "appointment_interval_window_v310",
+    },
+  };
+  const basePolicy = {
+    itemIds: [],
+    itemTitle: title,
+    title,
+    recurrenceRule: null,
+    minutesBefore: null,
+    windowEndInclusive: true,
+    catchUpMode: "one_immediate_then_resume" as const,
+    onWindowEnd: "expire_silently" as const,
+    quietHoursStart: null,
+    quietHoursEnd: null,
+    allowDuringQuietHours: false,
+  };
+  const reminderWindow: AgentReminderPolicy = {
+    ...basePolicy,
+    operation: "create_interval_window_policy",
+    category: "pre_event",
+    policyType: "interval_window",
+    startsAtLocal: params.startsAtLocal,
+    endsAtLocal: local(windowEnd),
+    nextFireAtLocal: params.startsAtLocal,
+    intervalMinutes: params.intervalMinutes,
+    requireAck: /пока\s+не\s+(?:отмеч|подтверд|сдела|готов)/i.test(params.text),
+    maxOccurrences: null,
+  };
+  const howDidItGo: AgentReminderPolicy = {
+    ...basePolicy,
+    operation: "create_post_event_reaction_policy",
+    category: "post_event",
+    policyType: "post_event_menu",
+    startsAtLocal: null,
+    endsAtLocal: null,
+    nextFireAtLocal: local(end),
+    intervalMinutes: null,
+    requireAck: false,
+    maxOccurrences: 1,
+  };
+
+  return {
+    ...params.execution,
+    intent: "create_plan" as const,
+    actionPlan: {
+      ...(params.execution.actionPlan ?? {
+        intent: "plan" as const,
+        summary: null,
+        reply: null,
+        confidence: 0.95,
+        requiresConfirmation: false,
+        actions: [],
+        memoryCandidates: [],
+        clarificationQuestions: [],
+      }),
+      intent: "plan" as const,
+      summary: params.execution.actionPlan?.summary ?? title,
+      actions: [event],
+      clarificationQuestions: [],
+    },
+    itemUpdates: [],
+    reminderPolicies: [reminderWindow, howDidItGo],
+    clarificationQuestions: [],
+  };
+}
+
+// "в 13.00", "в 13:00", "в 3 дня" before the reminder request; never a reminder time.
+function extractAppointmentClock(text: string) {
+  const reminderAt = text.search(/напомин|напомн|повторя/i);
+  const head = reminderAt >= 0 ? text.slice(0, reminderAt) : text;
+  const match = head.match(
+    /(?:^|\s)в\s+([01]?\d|2[0-3])(?:[.:]([0-5]\d))?(?:\s*(утра|дня|вечера|ночи|час(?:а|ов)?))?(?=$|[\s,.;!?])(?!\s+(?:раз|минут|дн|недел|месяц))/i,
+  );
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const pm = /^(?:дня|вечера)$/i.test(match[3] ?? "") && hour < 12;
+  return { hour: pm ? hour + 12 : hour, minute: Number(match[2] ?? 0) };
+}
+
+function cleanAppointmentTitle(value: string) {
+  const cleaned = value
+    .replace(
+      /(?:^|\s)в\s+\d{1,2}(?:[.:]\d{2})?(?:\s*(?:утра|дня|вечера|ночи|час(?:а|ов)?))?(?=$|[\s,.;!?])/gi,
+      " ",
+    )
+    .replace(/(?:^|\s)(?:сегодня|завтра|послезавтра)(?=$|[\s,.;!?])/gi, " ")
+    .replace(/^напоминани[ея]\s+о\s+/i, "")
+    .replace(/\s+/g, " ")
+    .replace(/^[\s,.;:—-]+|[\s,.;:—-]+$/g, "");
+  if (!cleaned) return null;
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
 }
 
 function buildSyntheticIntervalAction(title: string, timezone: string): ActionPlanItem {
