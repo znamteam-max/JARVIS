@@ -41,6 +41,7 @@ import {
   clearActiveInteractionSessions,
   clearActiveInteractionSessionsWithDetails,
   isGlobalCreationIntent,
+  isSessionFollowUpScheduleText,
   isSessionCancelText,
 } from "@/bot/sessionRouting";
 import { parseStandaloneIntervalWindowReminderIntent } from "@/domain/intervalWindowReminderIntent";
@@ -157,6 +158,17 @@ export async function handleJarvisTurn(ctx: BotContext, text: string, timezone: 
       trace.toolCallsExecuted = ["pinned_context_note"];
       trace.finalAction = "pinned_context_note_handled";
       trace.naturalLanguagePlanResult = "pinned_context_note_handled";
+      return;
+    }
+
+    // A bare time/reminder reply answers the bot's own "напиши новое время" prompt; the
+    // creation checks below would otherwise turn it into a new untitled item.
+    if (isSessionFollowUpScheduleText(text) && (await handleItemEditTurn(ctx, text, timezone))) {
+      trace.aiRequired = false;
+      trace.finalAction = "item_edit_session_handled";
+      trace.toolCallsExecuted = ["item_edit_session"];
+      trace.updatedItemIds = [];
+      trace.sessionRouting = { handledBy: "item_edit_session", scheduleFollowUp: true };
       return;
     }
 

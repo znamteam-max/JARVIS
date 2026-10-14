@@ -15,7 +15,10 @@ import {
   detectBeforeEventReminderMode,
   parseBeforeEventReminderSpecsForAnchor,
 } from "@/domain/beforeEventReminderParsing";
-import { normalizeUntilDoneReminder } from "@/domain/untilDoneReminderText";
+import {
+  normalizeUntilDoneReminder,
+  parseExplicitReminderIntervalMinutes,
+} from "@/domain/untilDoneReminderText";
 
 import { parseRussianDateTime, parseRussianTimeRange } from "./russianDateTime";
 
@@ -109,6 +112,13 @@ export function parseItemEditMutation(params: {
       : deadline
         ? null
         : parsedTimeRange);
+  // "завтра с 6 до 9, каждый час напоминай": the range says when to remind, it is not a
+  // new time slot for the item.
+  const reminderWindow =
+    timeRange && !allDayRange
+      ? parseReminderWindowMutation({ text: params.text, range: timeRange })
+      : null;
+  const scheduleRange = reminderWindow ? null : timeRange;
   const dateTime =
     timeRange || deadline
       ? null
@@ -118,20 +128,24 @@ export function parseItemEditMutation(params: {
           now,
           baseDate: anchor,
         });
-  const scheduledLocal = timeRange?.startLocal ?? dateTime?.local ?? null;
-  const reminderPolicy = parseReminderMutation({
-    text: params.text,
-    timezone,
-    dateTimeLocal: scheduledLocal,
-    item,
-    now,
-  });
+  const scheduledLocal = scheduleRange?.startLocal ?? dateTime?.local ?? null;
+  const reminderPolicy =
+    reminderWindow ??
+    parseReminderMutation({
+      text: params.text,
+      timezone,
+      dateTimeLocal: scheduledLocal,
+      item,
+      now,
+    });
   const kind =
     (title ? inferKind({ title, currentKind: item.kind }) : null) ??
     (allDayRange && ["task", "preparation_task"].includes(item.kind) ? "event" : null) ??
-    (timeRange && !deadline && ["task", "preparation_task"].includes(item.kind) ? "event" : null);
+    (scheduleRange && !deadline && ["task", "preparation_task"].includes(item.kind)
+      ? "event"
+      : null);
   const changedFields: string[] = [];
-  const warnings = [...(timeRange?.warnings ?? dateTime?.warnings ?? [])];
+  const warnings = [...(scheduleRange?.warnings ?? dateTime?.warnings ?? [])];
 
   if (title && title !== item.title) changedFields.push("title");
   if (kind && kind !== item.kind) changedFields.push("kind");
@@ -147,8 +161,8 @@ export function parseItemEditMutation(params: {
     ...(scheduledLocal
       ? { scheduledForLocal: scheduledLocal.toISO({ suppressMilliseconds: true }) ?? undefined }
       : {}),
-    ...(timeRange
-      ? { endsAtLocal: timeRange.endLocal.toISO({ suppressMilliseconds: true }) ?? undefined }
+    ...(scheduleRange
+      ? { endsAtLocal: scheduleRange.endLocal.toISO({ suppressMilliseconds: true }) ?? undefined }
       : {}),
     ...(allDayRange ? { allDay: true } : {}),
     ...(deadline
@@ -159,7 +173,25 @@ export function parseItemEditMutation(params: {
     changedFields: [...new Set(changedFields)],
     warnings: [...new Set(warnings)],
     pastConfirmationRequired:
-      timeRange?.pastConfirmationRequired ?? dateTime?.pastConfirmationRequired ?? false,
+      scheduleRange?.pastConfirmationRequired ?? dateTime?.pastConfirmationRequired ?? false,
+  };
+}
+
+function parseReminderWindowMutation(params: {
+  text: string;
+  range: { startLocal: DateTime; endLocal: DateTime };
+}): ItemEditReminderMutation | null {
+  if (!/напоминай|напомни|напоминать/i.test(params.text)) return null;
+  const intervalMinutes = parseExplicitReminderIntervalMinutes(params.text);
+  if (!intervalMinutes || params.range.endLocal <= params.range.startLocal) return null;
+  return {
+    policyType: "nag_until_ack",
+    startsAtLocal: params.range.startLocal.toISO({ suppressMilliseconds: true }) ?? "",
+    endsAtLocal: params.range.endLocal.toISO({ suppressMilliseconds: true }) ?? "",
+    intervalMinutes,
+    activeWindowStart: params.range.startLocal.toFormat("HH:mm"),
+    activeWindowEnd: params.range.endLocal.toFormat("HH:mm"),
+    stopCondition: "until_done",
   };
 }
 

@@ -66,6 +66,32 @@ export function isGlobalCreationIntent(text: string) {
   );
 }
 
+const SCHEDULE_FOLLOW_UP_WORDS = new Set(
+  [
+    "сегодня завтра послезавтра утром днем вечером ночью",
+    "понедельник вторник среда среду четверг пятница пятницу суббота субботу воскресенье",
+    "января февраля марта апреля мая июня июля августа сентября октября ноября декабря",
+    "утра дня вечера ночи час часа часов полчаса минут минуты",
+    "каждый каждые каждую раз",
+    "напоминай напомни напоминать напоминание напоминания",
+    "дедлайн срок пока не отмечу сделаю выполню",
+    "перенеси поставь сдвинь",
+    "с со до к ко в во на по и а но",
+  ]
+    .join(" ")
+    .split(" "),
+);
+
+// "Завтра с 6 до 9, каждый час напоминай, дедлайн 10" has no subject of its own: it
+// answers the open "напиши новое время" prompt instead of creating something new.
+export function isSessionFollowUpScheduleText(text: string) {
+  const words = normalizeSessionText(text)
+    .replace(/\d{1,2}(?:[.:]\d{2})?/g, " ")
+    .split(/[^а-яa-z]+/)
+    .filter(Boolean);
+  return words.length > 0 && words.every((word) => SCHEDULE_FOLLOW_UP_WORDS.has(word));
+}
+
 export async function clearActiveInteractionSessions(params: {
   userId: string;
   reason: string;
@@ -134,10 +160,7 @@ function details(
   };
 }
 
-function extractSessionItemId(
-  input?: Record<string, unknown>,
-  output?: Record<string, unknown>,
-) {
+function extractSessionItemId(input?: Record<string, unknown>, output?: Record<string, unknown>) {
   for (const key of ["itemId", "activeEditItemId", "externalEventId"]) {
     const value = output?.[key] ?? input?.[key];
     if (typeof value === "string") return value;
