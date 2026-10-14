@@ -522,10 +522,22 @@ async function resolvePolicyTargetsInTransaction(params: {
         ),
       );
   }
+  return matchPolicyTargetsByTitle(params);
+}
+
+export function matchPolicyTargetsByTitle(params: {
+  proposal: AgentReminderPolicy;
+  createdItems: Array<typeof plannerItems.$inferSelect>;
+  timezone: string;
+}) {
   if (!params.proposal.itemTitle) return [];
   const candidates = params.createdItems.filter(
     (item) => normalizeTitle(item.title) === normalizeTitle(params.proposal.itemTitle!),
   );
+  // The AI words policy titles a little differently ("…, дедлайн 23.59 сегодня" vs
+  // "…, дедлайн 23.59"). With one created item there is nothing to choose between, and
+  // an unattached policy only ever sends a bare "Напоминание." card.
+  if (!candidates.length && params.createdItems.length === 1) return [...params.createdItems];
   if (candidates.length <= 1) return candidates;
   if (
     params.proposal.policyType === "before_event" &&
@@ -682,7 +694,9 @@ function isTodayUntilDonePolicyProposal(proposal: AgentReminderPolicy) {
   if (proposal.policyType !== "nag_until_ack") return false;
   if (proposal.requireAck !== true) return false;
   if (!proposal.endsAtLocal) return false;
-  return proposal.category === "nag_until_done" || proposal.onWindowEnd === "move_to_overdue_or_review";
+  return (
+    proposal.category === "nag_until_done" || proposal.onWindowEnd === "move_to_overdue_or_review"
+  );
 }
 
 function localIsoWithOffset(value: string | null, timezone: string) {
