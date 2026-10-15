@@ -28,6 +28,7 @@ import { requireOwner, type BotContext } from "./context";
 import { attachOwner, requireAllowedOwner } from "./authorization";
 import { registerCallbacks } from "./callbacks";
 import { registerCommands } from "./commands";
+import { registerFoodHandlers } from "./foodHandlers";
 import { registerMessageHandlers } from "./messageHandlers";
 import { recordUpdateOnce } from "./updateRecorder";
 import { stabilityScheduleReminderMenuKeyboard } from "./stabilityKeyboards";
@@ -281,6 +282,7 @@ export function createBot() {
     await ctx.reply(usage.text);
   });
 
+  registerFoodHandlers(instance);
   registerCommands(instance);
   registerCallbacks(instance);
   registerMessageHandlers(instance);

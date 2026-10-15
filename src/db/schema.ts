@@ -682,6 +682,88 @@ export const releaseNotifications = assistantTable(
   ],
 );
 
+export const foodEntries = assistantTable(
+  "food_entries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    sourceMessageId: uuid("source_message_id").references(() => telegramMessages.id, {
+      onDelete: "set null",
+    }),
+    telegramFileId: text("telegram_file_id"),
+    caption: text("caption"),
+    title: text("title").notNull(),
+    eatenAt: timestamp("eaten_at", { withTimezone: true }).notNull(),
+    calories: integer("calories").notNull(),
+    proteinG: integer("protein_g").notNull(),
+    fatG: integer("fat_g").notNull(),
+    carbsG: integer("carbs_g").notNull(),
+    items: jsonb("items")
+      .$type<Array<Record<string, unknown>>>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    confidence: text("confidence").notNull(),
+    model: text("model"),
+    status: text("status").notNull().default("active"),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default(emptyJson),
+    ...timestamps,
+  },
+  (table) => [index("food_entries_user_eaten_idx").on(table.userId, table.eatenAt)],
+);
+
+export const stravaConnections = assistantTable(
+  "strava_connections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    athleteId: bigint("athlete_id", { mode: "bigint" }).notNull(),
+    athleteName: text("athlete_name"),
+    encryptedAccessToken: text("encrypted_access_token").notNull(),
+    encryptedRefreshToken: text("encrypted_refresh_token").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    scope: text("scope"),
+    status: text("status").notNull().default("active"),
+    lastSyncAt: timestamp("last_sync_at", { withTimezone: true }),
+    lastSyncError: text("last_sync_error"),
+    ...timestamps,
+  },
+  (table) => [uniqueIndex("strava_connections_user_idx").on(table.userId)],
+);
+
+export const stravaActivities = assistantTable(
+  "strava_activities",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    stravaId: bigint("strava_id", { mode: "bigint" }).notNull(),
+    name: text("name").notNull(),
+    sportType: text("sport_type").notNull(),
+    startAt: timestamp("start_at", { withTimezone: true }).notNull(),
+    timezone: text("timezone"),
+    distanceM: integer("distance_m").notNull().default(0),
+    movingTimeS: integer("moving_time_s").notNull().default(0),
+    elapsedTimeS: integer("elapsed_time_s").notNull().default(0),
+    elevationGainM: integer("elevation_gain_m").notNull().default(0),
+    averageHeartrate: integer("average_heartrate"),
+    maxHeartrate: integer("max_heartrate"),
+    calories: integer("calories"),
+    sufferScore: integer("suffer_score"),
+    raw: jsonb("raw").$type<Record<string, unknown>>().notNull().default(emptyJson),
+    notifiedAt: timestamp("notified_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("strava_activities_strava_id_idx").on(table.stravaId),
+    index("strava_activities_user_start_idx").on(table.userId, table.startAt),
+  ],
+);
+
 export type User = typeof users.$inferSelect;
 export type PlannerItem = typeof plannerItems.$inferSelect;
 export type Reminder = typeof reminders.$inferSelect;
@@ -704,3 +786,6 @@ export type AgentAction = typeof agentActions.$inferSelect;
 export type ExternalCalendarEvent = typeof externalCalendarEvents.$inferSelect;
 export type CalendarImportState = typeof calendarImportState.$inferSelect;
 export type ReleaseNotification = typeof releaseNotifications.$inferSelect;
+export type FoodEntry = typeof foodEntries.$inferSelect;
+export type StravaConnection = typeof stravaConnections.$inferSelect;
+export type StravaActivity = typeof stravaActivities.$inferSelect;

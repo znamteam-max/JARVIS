@@ -71,6 +71,13 @@
       "when": 1781535600000,
       "tag": "0009_release_notifications",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1792080000000,
+      "tag": "0010_food_and_strava",
+      "breakpoints": true
     }
   ]
 }
