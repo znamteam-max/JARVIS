@@ -5,6 +5,7 @@ import {
   markStravaActivitiesNotified,
   markStravaActivityIdsNotified,
   markStravaSynced,
+  setStravaConnectionStatus,
   updateStravaTokens,
   upsertStravaActivities,
 } from "@/db/queries/strava";
@@ -16,7 +17,7 @@ import {
   type StravaActivityRow,
 } from "@/domain/stravaActivity";
 import { decryptSecret, encryptSecret } from "@/integrations/encryption";
-import { fetchStravaActivities, refreshStravaToken } from "@/integrations/strava";
+import { fetchStravaActivities, refreshStravaToken, StravaApiError } from "@/integrations/strava";
 import { isStravaConfigured } from "@/lib/env";
 import { logger } from "@/lib/logger";
 
@@ -43,9 +44,23 @@ export async function syncStravaIfDue(now = new Date()) {
       const message = error instanceof Error ? error.message : String(error);
       logger.warn("Strava sync failed", { error: message });
       await markStravaSynced({ connectionId: entry.connection.id, at: now, error: message });
+      if (error instanceof StravaApiError && error.forbidden) {
+        await stopForbiddenStravaConnection(entry.connection.id, message);
+        await getBot().api.sendMessage(entry.telegramUserId.toString(), STRAVA_FORBIDDEN_TEXT);
+      }
     }
   }
   return { synced: synced > 0, connections: synced };
+}
+
+export const STRAVA_FORBIDDEN_TEXT = [
+  "Strava не отдаёт тренировки: с 2026 года её API работает только при платной подписке Strava у владельца аккаунта.",
+  "Синхронизацию остановил. Если оформишь подписку — напиши /strava и подключи заново.",
+].join("\n");
+
+// Retrying every 30 minutes cannot fix a missing subscription; stop until reconnected.
+export function stopForbiddenStravaConnection(connectionId: string, error: string) {
+  return setStravaConnectionStatus({ connectionId, status: "forbidden", error });
 }
 
 export async function syncStravaConnection(params: {

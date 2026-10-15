@@ -1,12 +1,16 @@
 import { InlineKeyboard, type Bot } from "grammy";
 import { DateTime } from "luxon";
 
-import { getStravaConnection, listStravaActivitiesSince } from "@/db/queries/strava";
+import {
+  getLatestStravaConnection,
+  getStravaConnection,
+  listStravaActivitiesSince,
+} from "@/db/queries/strava";
 import { formatWeekSummary } from "@/domain/stravaActivity";
 import { createStravaConnectLink } from "@/integrations/strava";
 import { isStravaConfigured } from "@/lib/env";
 import { logger } from "@/lib/logger";
-import { syncStravaConnection } from "@/services/stravaSync";
+import { STRAVA_FORBIDDEN_TEXT, syncStravaConnection } from "@/services/stravaSync";
 
 import type { BotContext } from "./context";
 import { requireOwner } from "./context";
@@ -57,9 +61,12 @@ async function renderStrava(ctx: BotContext) {
   }
   const connection = await getStravaConnection(owner.id);
   if (!connection) {
+    const previous = await getLatestStravaConnection(owner.id);
     await replyAndRecord(
       ctx,
-      "Strava не подключена. Нажми кнопку, разреши доступ к тренировкам — и я начну их собирать. Ссылка действует 30 минут.",
+      previous?.status === "forbidden"
+        ? `${STRAVA_FORBIDDEN_TEXT}\n\nКнопка ниже — подключить заново после оформления подписки.`
+        : "Strava не подключена. Нажми кнопку, разреши доступ к тренировкам — и я начну их собирать. Ссылка действует 30 минут.",
       {
         reply_markup: new InlineKeyboard().url(
           "🔗 Подключить Strava",

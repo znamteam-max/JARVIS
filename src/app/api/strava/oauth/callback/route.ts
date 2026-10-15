@@ -5,9 +5,13 @@ import { listStravaActivitiesSince, upsertStravaConnection } from "@/db/queries/
 import { getUserByTelegramId } from "@/db/queries/users";
 import { formatWeekSummary } from "@/domain/stravaActivity";
 import { encryptSecret } from "@/integrations/encryption";
-import { exchangeStravaCode, readStravaState } from "@/integrations/strava";
+import { exchangeStravaCode, readStravaState, StravaApiError } from "@/integrations/strava";
 import { logger } from "@/lib/logger";
-import { syncStravaConnection } from "@/services/stravaSync";
+import {
+  STRAVA_FORBIDDEN_TEXT,
+  stopForbiddenStravaConnection,
+  syncStravaConnection,
+} from "@/services/stravaSync";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,6 +29,7 @@ export async function GET(request: Request) {
     return page("Без доступа к тренировкам подключение бесполезно. Повтори и оставь галочки.", 400);
   }
 
+  let saved: { connectionId: string; telegramUserId: bigint } | null = null;
   try {
     const user = await getUserByTelegramId(parsed.telegramUserId);
     if (!user) throw new Error("Owner user not found for Strava state");
@@ -42,6 +47,7 @@ export async function GET(request: Request) {
       scope,
     });
     if (!connection) throw new Error("Strava connection was not saved");
+    saved = { connectionId: connection.id, telegramUserId: user.telegramUserId };
 
     const now = new Date();
     const result = await syncStravaConnection({
@@ -65,9 +71,15 @@ export async function GET(request: Request) {
     );
     return page("Strava подключена. Можно закрыть вкладку и вернуться в Telegram.");
   } catch (error) {
-    logger.warn("Strava OAuth callback failed", {
-      error: error instanceof Error ? error.message : String(error),
-    });
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn("Strava OAuth callback failed", { error: message });
+    if (error instanceof StravaApiError && error.forbidden && saved) {
+      await stopForbiddenStravaConnection(saved.connectionId, message);
+      await getBot().api.sendMessage(saved.telegramUserId.toString(), STRAVA_FORBIDDEN_TEXT);
+      return page(
+        "Strava пустила, но не отдаёт тренировки без платной подписки Strava. Подробности — в Telegram.",
+      );
+    }
     return page("Не получилось подключить Strava. Попробуй ещё раз командой /strava.", 500);
   }
 }

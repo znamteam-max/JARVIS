@@ -63,8 +63,30 @@ export async function fetchStravaActivities(params: {
     headers: { authorization: `Bearer ${params.accessToken}` },
     cache: "no-store",
   });
-  if (!response.ok) throw new Error(`Strava activities request failed: ${response.status}`);
+  if (!response.ok) throw await stravaApiError("activities", response);
   return (await response.json()) as Array<Record<string, unknown>>;
+}
+
+// Since mid-2026 Strava answers 403 to apps whose owner has no Strava subscription.
+export class StravaApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+
+  get forbidden() {
+    return this.status === 403;
+  }
+}
+
+async function stravaApiError(request: string, response: Response) {
+  const body = (await response.text().catch(() => "")).slice(0, 300);
+  return new StravaApiError(
+    `Strava ${request} request failed: ${response.status} ${body}`,
+    response.status,
+  );
 }
 
 async function postStravaToken(params: Record<string, string>) {
@@ -78,6 +100,6 @@ async function postStravaToken(params: Record<string, string>) {
     }),
     cache: "no-store",
   });
-  if (!response.ok) throw new Error(`Strava token request failed: ${response.status}`);
+  if (!response.ok) throw await stravaApiError("token", response);
   return (await response.json()) as StravaTokenResponse;
 }

@@ -135,3 +135,24 @@ export async function markStravaActivityIdsNotified(ids: string[], at: Date) {
     .set({ notifiedAt: at, updatedAt: new Date() })
     .where(inArray(stravaActivities.id, ids));
 }
+
+export async function setStravaConnectionStatus(params: {
+  connectionId: string;
+  status: "active" | "forbidden";
+  error: string | null;
+}) {
+  await getDb()
+    .update(stravaConnections)
+    .set({ status: params.status, lastSyncError: params.error, updatedAt: new Date() })
+    .where(eq(stravaConnections.id, params.connectionId));
+}
+
+export async function getLatestStravaConnection(userId: string) {
+  const [row] = await getDb()
+    .select()
+    .from(stravaConnections)
+    .where(eq(stravaConnections.userId, userId))
+    .orderBy(desc(stravaConnections.updatedAt))
+    .limit(1);
+  return row ?? null;
+}
