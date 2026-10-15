@@ -403,6 +403,8 @@ export async function renderLiveDashboard(params: {
       keyboard: entityListKeyboard(refs, true),
       viewState: null,
       conflicts,
+      // Row N of the text is refs[N - 1]; the Mini App uses it to edit the right item.
+      refs,
     };
   }
 

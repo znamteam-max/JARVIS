@@ -1,6 +1,6 @@
 import { sumFoodMacros, type FoodItemEstimate, type FoodMacros } from "@/domain/foodEstimate";
 
-export type PlanRow = { text: string; details: string[] };
+export type PlanRow = { number: number; text: string; details: string[] };
 export type PlanSection = { title: string; rows: PlanRow[]; note: string | null };
 
 // The bot's "JARVIS · План" message is the single source of truth for the schedule;
@@ -12,9 +12,9 @@ export function parsePlanSections(text: string): PlanSection[] {
     const line = rawLine.replace(/<[^>]+>/g, "");
     const trimmed = line.trim();
     if (!trimmed || trimmed === "JARVIS · План" || trimmed.startsWith("Нажми номер")) continue;
-    const row = trimmed.match(/^\d+\s·\s(.+)$/);
+    const row = trimmed.match(/^(\d+)\s·\s(.+)$/);
     if (row && current) {
-      current.rows.push({ text: row[1].trim(), details: [] });
+      current.rows.push({ number: Number(row[1]), text: row[2].trim(), details: [] });
       continue;
     }
     if (/^\s/.test(line) && current?.rows.length) {

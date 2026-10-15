@@ -27,6 +27,9 @@ const ERRORS: Record<string, string> = {
   not_food: "На фото не видно еды. Попробуй ещё раз или добавь подпись.",
   estimation_failed: "Не получилось посчитать калории. Попробуй ещё раз чуть позже.",
   photo_missing_or_too_large: "Фото не загрузилось или слишком большое.",
+  reminders_not_understood:
+    "Не понял напоминание. Напиши, например: «за час и за 15 минут» или «каждый час с 8 до 12».",
+  not_found: "Этот пункт уже изменился. Обнови расписание.",
 };
 
 export function MiniApp() {
@@ -85,9 +88,9 @@ export function MiniApp() {
         {error ? <div className={styles.error}>{error}</div> : null}
         {!summary && initData !== "" ? <div className={styles.caption}>Загружаю…</div> : null}
         {summary && tab === "today" ? (
-          <TodayTab summary={summary} openPlan={() => setTab("plan")} />
+          <TodayTab summary={summary} openPlan={() => setTab("plan")} call={call} busy={busy} />
         ) : null}
-        {summary && tab === "plan" ? <PlanTab summary={summary} /> : null}
+        {summary && tab === "plan" ? <PlanTab summary={summary} call={call} busy={busy} /> : null}
         {summary && tab === "food" ? <FoodTab summary={summary} busy={busy} call={call} /> : null}
         {summary && tab === "fitness" ? <FitnessTab summary={summary} /> : null}
       </div>
@@ -130,7 +133,17 @@ function kcal(value: number) {
   return Math.round(value).toLocaleString("ru-RU");
 }
 
-function TodayTab({ summary, openPlan }: { summary: MiniAppSummary; openPlan: () => void }) {
+function TodayTab({
+  summary,
+  openPlan,
+  call,
+  busy,
+}: {
+  summary: MiniAppSummary;
+  openPlan: () => void;
+  call: Call;
+  busy: boolean;
+}) {
   const { budget, eaten, goals, workoutCalories } = summary;
   const circumference = 2 * Math.PI * 84;
   const near = summary.plan.filter((section) => /^(Сейчас|Сегодня|Не закрыто)/.test(section.title));
@@ -236,7 +249,9 @@ function TodayTab({ summary, openPlan }: { summary: MiniAppSummary; openPlan: ()
         </button>
       </div>
       {near.length ? (
-        near.map((section) => <PlanSectionCard key={section.title} section={section} />)
+        near.map((section) => (
+          <PlanSectionCard key={section.title} section={section} call={call} busy={busy} />
+        ))
       ) : (
         <div className={styles.card}>
           <span className={styles.caption}>На сегодня в плане ничего нет.</span>
@@ -246,20 +261,52 @@ function TodayTab({ summary, openPlan }: { summary: MiniAppSummary; openPlan: ()
   );
 }
 
-function PlanSectionCard({ section }: { section: MiniAppSummary["plan"][number] }) {
+type PlanSection = MiniAppSummary["plan"][number];
+type EditableItem = NonNullable<PlanSection["rows"][number]["item"]>;
+
+function PlanSectionCard({
+  section,
+  call,
+  busy,
+}: {
+  section: PlanSection;
+  call: Call;
+  busy: boolean;
+}) {
+  const [editing, setEditing] = useState<number | null>(null);
   return (
     <section className={styles.card} aria-label={section.title}>
       <h2 className={styles.sectionTitle}>{section.title}</h2>
       {section.rows.length ? (
         <div className={styles.rows}>
-          {section.rows.map((row, index) => (
-            <div key={`${row.text}-${index}`} className={styles.row}>
-              <span>{row.text}</span>
+          {section.rows.map((row) => (
+            <div key={`${row.number}-${row.text}`} className={styles.row}>
+              <div className={styles.header}>
+                <span>{row.text}</span>
+                {row.item ? (
+                  <button
+                    type="button"
+                    className={styles.linkButton}
+                    onClick={() => setEditing(editing === row.number ? null : row.number)}
+                  >
+                    {editing === row.number ? "Закрыть" : "Изменить"}
+                  </button>
+                ) : null}
+              </div>
               {row.details.map((detail) => (
                 <span key={detail} className={styles.detail}>
                   {detail}
                 </span>
               ))}
+              {row.item && editing === row.number ? (
+                <EditItemForm
+                  item={row.item}
+                  details={row.details}
+                  call={call}
+                  busy={busy}
+                  close={() => setEditing(null)}
+                />
+              ) : null}
             </div>
           ))}
         </div>
@@ -269,7 +316,127 @@ function PlanSectionCard({ section }: { section: MiniAppSummary["plan"][number] 
   );
 }
 
-function PlanTab({ summary }: { summary: MiniAppSummary }) {
+function EditItemForm({
+  item,
+  details,
+  call,
+  busy,
+  close,
+}: {
+  item: EditableItem;
+  details: string[];
+  call: Call;
+  busy: boolean;
+  close: () => void;
+}) {
+  const [title, setTitle] = useState(item.title);
+  const [start, setStart] = useState(item.startLocal ?? "");
+  const [end, setEnd] = useState(item.endLocal ?? "");
+  const [due, setDue] = useState(item.dueLocal ?? "");
+  const [reminders, setReminders] = useState("");
+  const isEvent = ["event", "training", "tentative_event"].includes(item.kind);
+  const id = (field: string) => `${field}-${item.id}`;
+
+  async function save() {
+    const body: Record<string, unknown> = { id: item.id };
+    if (title.trim() && title.trim() !== item.title) body.title = title.trim();
+    if (isEvent && start && (start !== item.startLocal || end !== (item.endLocal ?? ""))) {
+      body.startLocal = start;
+      if (end) body.endLocal = end;
+    }
+    if (!isEvent && due !== (item.dueLocal ?? "")) body.dueLocal = due || null;
+    if (reminders.trim()) body.remindersText = reminders.trim();
+    const saved = await call("/api/miniapp/item", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (saved) close();
+  }
+
+  return (
+    <div className={styles.card} style={{ background: "var(--surface2)", marginTop: 8 }}>
+      <label className={styles.caption} htmlFor={id("title")}>
+        Название
+      </label>
+      <input
+        id={id("title")}
+        className={styles.input}
+        value={title}
+        onChange={(event) => setTitle(event.target.value)}
+      />
+      {isEvent ? (
+        <>
+          <label className={styles.caption} htmlFor={id("start")}>
+            Начало
+          </label>
+          <input
+            id={id("start")}
+            className={styles.input}
+            type="datetime-local"
+            value={start}
+            onChange={(event) => setStart(event.target.value)}
+          />
+          <label className={styles.caption} htmlFor={id("end")}>
+            Конец
+          </label>
+          <input
+            id={id("end")}
+            className={styles.input}
+            type="datetime-local"
+            value={end}
+            onChange={(event) => setEnd(event.target.value)}
+          />
+        </>
+      ) : (
+        <>
+          <label className={styles.caption} htmlFor={id("due")}>
+            Дедлайн
+          </label>
+          <div className={styles.ingredient}>
+            <input
+              id={id("due")}
+              className={styles.input}
+              type="datetime-local"
+              value={due}
+              onChange={(event) => setDue(event.target.value)}
+            />
+            {due ? (
+              <button type="button" className={styles.secondary} onClick={() => setDue("")}>
+                Без дедлайна
+              </button>
+            ) : null}
+          </div>
+        </>
+      )}
+      <span className={styles.caption}>Напоминания сейчас</span>
+      {details.length ? (
+        details.map((detail) => (
+          <span key={detail} className={styles.detail}>
+            {detail}
+          </span>
+        ))
+      ) : (
+        <span className={styles.detail}>нет</span>
+      )}
+      <label className={styles.caption} htmlFor={id("reminders")}>
+        Новые напоминания
+      </label>
+      <input
+        id={id("reminders")}
+        className={styles.input}
+        value={reminders}
+        placeholder="за час и за 15 минут · каждый час с 8 до 12"
+        onChange={(event) => setReminders(event.target.value)}
+      />
+      <button type="button" className={styles.primary} disabled={busy} onClick={() => void save()}>
+        Сохранить
+      </button>
+    </div>
+  );
+}
+
+function PlanTab({ summary, call, busy }: { summary: MiniAppSummary; call: Call; busy: boolean }) {
   return (
     <>
       <div className={styles.headerText}>
@@ -277,7 +444,9 @@ function PlanTab({ summary }: { summary: MiniAppSummary }) {
         <h1 className={styles.title}>Расписание</h1>
       </div>
       {summary.plan.length ? (
-        summary.plan.map((section) => <PlanSectionCard key={section.title} section={section} />)
+        summary.plan.map((section) => (
+          <PlanSectionCard key={section.title} section={section} call={call} busy={busy} />
+        ))
       ) : (
         <div className={styles.card}>
           <span className={styles.caption}>План пуст.</span>
@@ -292,15 +461,29 @@ type Call = (path: string, init?: RequestInit) => Promise<boolean>;
 function FoodTab({ summary, busy, call }: { summary: MiniAppSummary; busy: boolean; call: Call }) {
   const fileInput = useRef<HTMLInputElement>(null);
   const [caption, setCaption] = useState("");
+  const [pending, setPending] = useState<{ blob: Blob; url: string } | null>(null);
   const [goalsOpen, setGoalsOpen] = useState(false);
   const { food, goals } = summary;
   const maxValue = Math.max(goals.calories * 1.25, ...food.week.map((day) => day.calories), 1);
 
-  async function upload(file: File) {
+  // Photo first, then "what is it and roughly how much", then the estimate.
+  async function choose(file: File) {
+    const blob = await compressImage(file);
+    setPending({ blob, url: URL.createObjectURL(blob) });
+  }
+
+  function discard() {
+    if (pending) URL.revokeObjectURL(pending.url);
+    setPending(null);
+    setCaption("");
+  }
+
+  async function analyze() {
+    if (!pending) return;
     const form = new FormData();
-    form.append("photo", await compressImage(file), "food.jpg");
+    form.append("photo", pending.blob, "food.jpg");
     if (caption.trim()) form.append("caption", caption.trim());
-    if (await call("/api/miniapp/food", { method: "POST", body: form })) setCaption("");
+    if (await call("/api/miniapp/food", { method: "POST", body: form })) discard();
   }
 
   return (
@@ -326,16 +509,41 @@ function FoodTab({ summary, busy, call }: { summary: MiniAppSummary; busy: boole
       ) : null}
 
       <div className={styles.card}>
-        <label className={styles.caption} htmlFor="food-caption">
-          Подпись к фото (необязательно)
-        </label>
-        <input
-          id="food-caption"
-          className={styles.input}
-          value={caption}
-          placeholder="например: гречка с курицей, 300 г"
-          onChange={(event) => setCaption(event.target.value)}
-        />
+        {pending ? (
+          <>
+            {/* eslint-disable-next-line @next/next/no-img-element -- local blob preview */}
+            <img
+              src={pending.url}
+              alt="Фото еды"
+              style={{ width: "100%", maxHeight: 260, objectFit: "cover", borderRadius: 14 }}
+            />
+            <label className={styles.caption} htmlFor="food-caption">
+              Что это и сколько примерно
+            </label>
+            <textarea
+              id="food-caption"
+              className={styles.input}
+              style={{ minHeight: 72, paddingTop: 10 }}
+              value={caption}
+              placeholder="например: шаурма с курицей без соуса, лаваша мало, ~300 г"
+              onChange={(event) => setCaption(event.target.value)}
+            />
+            <div className={styles.chips}>
+              <button
+                type="button"
+                className={styles.primary}
+                style={{ flex: 1 }}
+                disabled={busy}
+                onClick={() => void analyze()}
+              >
+                {busy ? "Анализирую…" : "Анализировать"}
+              </button>
+              <button type="button" className={styles.secondary} disabled={busy} onClick={discard}>
+                Отмена
+              </button>
+            </div>
+          </>
+        ) : null}
         <input
           ref={fileInput}
           className={styles.hidden}
@@ -346,7 +554,7 @@ function FoodTab({ summary, busy, call }: { summary: MiniAppSummary; busy: boole
           onChange={(event) => {
             const file = event.target.files?.[0];
             event.target.value = "";
-            if (file) void upload(file);
+            if (file) void choose(file);
           }}
         />
         <button
@@ -355,7 +563,7 @@ function FoodTab({ summary, busy, call }: { summary: MiniAppSummary; busy: boole
           disabled={busy}
           onClick={() => fileInput.current?.click()}
         >
-          {busy ? "Считаю калории…" : "Сфотографировать еду"}
+          {pending ? "Переснять" : "Сфотографировать еду"}
         </button>
       </div>
 

@@ -52,7 +52,7 @@ export async function buildMiniAppSummary(user: User, now = new Date()) {
     eaten,
     workoutCalories,
     budget: computeCalorieBudget({ goals, eaten, workoutCalories }),
-    plan: parsePlanSections(plan.text),
+    plan: withEditableItems(plan, timezone),
     food: {
       today: todayFood.map((entry) => foodView(entry, timezone)),
       week,
@@ -93,6 +93,39 @@ export async function buildMiniAppSummary(user: User, now = new Date()) {
         : null,
     },
   };
+}
+
+// Each plan row carries its item's editable fields; external calendar rows stay read-only.
+function withEditableItems(
+  plan: Awaited<ReturnType<typeof renderLiveDashboard>>,
+  timezone: string,
+) {
+  const refs = ("refs" in plan ? plan.refs : undefined) ?? [];
+  const items = new Map(plan.items.map((item) => [item.id, item]));
+  const local = (date: Date | null) =>
+    date
+      ? DateTime.fromJSDate(date, { zone: "utc" }).setZone(timezone).toFormat("yyyy-MM-dd'T'HH:mm")
+      : null;
+  return parsePlanSections(plan.text).map((section) => ({
+    ...section,
+    rows: section.rows.map((row) => {
+      const ref = refs[row.number - 1];
+      const item = ref?.type === "planner_item" ? items.get(ref.id) : undefined;
+      return {
+        ...row,
+        item: item
+          ? {
+              id: item.id,
+              title: item.title,
+              kind: item.kind,
+              startLocal: local(item.startAt),
+              endLocal: local(item.endAt),
+              dueLocal: local(item.dueAt),
+            }
+          : null,
+      };
+    }),
+  }));
 }
 
 function foodView(entry: FoodEntry, timezone: string) {
