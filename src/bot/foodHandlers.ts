@@ -1,9 +1,20 @@
 import { InlineKeyboard, type Bot } from "grammy";
 
-import { estimateFoodFromImage } from "@/ai/foodEstimation";
+import { estimateFoodFromImage, reviseFoodEstimate } from "@/ai/foodEstimation";
 import { writeAudit } from "@/db/queries/audit";
-import { deleteFoodEntry, insertFoodEntry, listFoodEntriesForDay } from "@/db/queries/food";
 import {
+  deleteFoodEntry,
+  findFoodEntryForCorrection,
+  insertFoodEntry,
+  listFoodEntriesForDay,
+  requestFoodCorrection,
+  setFoodEntryReplyMessage,
+  toFoodEstimate,
+  updateFoodEntryEstimate,
+} from "@/db/queries/food";
+import type { FoodEntry } from "@/db/schema";
+import {
+  applySimpleFoodCorrections,
   formatFoodDaySummary,
   formatFoodEstimateReply,
   sumFoodMacros,
@@ -17,6 +28,7 @@ import { requireOwner } from "./context";
 import { replyAndRecord } from "./reply";
 
 const PHOTO_MIME_TYPE = "image/jpeg";
+const CORRECTION_WINDOW_MS = 15 * 60 * 1000;
 
 export function registerFoodHandlers(bot: Bot<BotContext>) {
   bot.on("message:photo", async (ctx) => {
@@ -72,21 +84,16 @@ export function registerFoodHandlers(bot: Bot<BotContext>) {
         timezone: owner.timezone,
         day: eatenAt,
       });
-      await replyAndRecord(
+      const card = await replyAndRecord(
         ctx,
         formatFoodEstimateReply({
           estimate: result.estimate,
           dayTotals: sumFoodMacros(day),
           dayCount: day.length,
         }),
-        entry
-          ? {
-              reply_markup: new InlineKeyboard()
-                .text("🗑 Удалить запись", `food:delete:${entry.id}`)
-                .text("🍽 За сегодня", "food:today"),
-            }
-          : undefined,
+        entry ? { reply_markup: foodCardKeyboard(entry.id) } : undefined,
       );
+      if (entry) await setFoodEntryReplyMessage(entry.id, card.message_id);
     } catch (error) {
       logger.warn("Food photo estimation failed", {
         error: error instanceof Error ? error.message : String(error),
@@ -105,6 +112,41 @@ export function registerFoodHandlers(bot: Bot<BotContext>) {
           : "Не получилось посчитать калории по фото. Попробуй ещё раз чуть позже.",
       );
     }
+  });
+
+  // A reply to a food card, or the next text after "✏️ Исправить", corrects that entry.
+  bot.on("message:text", async (ctx, next) => {
+    const text = ctx.message.text.trim();
+    if (!text || text.startsWith("/")) return next();
+    const owner = requireOwner(ctx);
+    const entry = await findFoodEntryForCorrection({
+      userId: owner.id,
+      replyToMessageId: ctx.message.reply_to_message?.message_id ?? null,
+      requestedSince: new Date(Date.now() - CORRECTION_WINDOW_MS),
+    });
+    if (!entry) return next();
+    await applyFoodCorrection(ctx, entry, text);
+  });
+
+  bot.callbackQuery(/^food:edit:([0-9a-f-]{36})$/, async (ctx) => {
+    const owner = requireOwner(ctx);
+    const entry = await requestFoodCorrection({
+      userId: owner.id,
+      entryId: ctx.match[1],
+      at: new Date(),
+    });
+    await ctx.answerCallbackQuery(entry ? undefined : "Запись уже удалена");
+    if (!entry) return;
+    const items = toFoodEstimate(entry)
+      .items.map((item) => `${item.name}${item.grams ? ` ${item.grams} г` : ""}`)
+      .join(", ");
+    await replyAndRecord(
+      ctx,
+      [
+        `Что поправить в «${entry.title}»? Сейчас: ${items}.`,
+        "Напиши одним сообщением, например: «лаваш 50 г», «курицы 200 г», «убери овощи», «добавь соус 30 г» или «курицы было больше».",
+      ].join("\n"),
+    );
   });
 
   bot.command("food", async (ctx) => {
@@ -131,6 +173,74 @@ export function registerFoodHandlers(bot: Bot<BotContext>) {
       await replyAndRecord(ctx, await renderFoodToday(ctx));
     }
   });
+}
+
+function foodCardKeyboard(entryId: string) {
+  return new InlineKeyboard()
+    .text("✏️ Исправить", `food:edit:${entryId}`)
+    .text("🗑 Удалить", `food:delete:${entryId}`)
+    .row()
+    .text("🍽 За сегодня", "food:today");
+}
+
+async function applyFoodCorrection(ctx: BotContext, entry: FoodEntry, correction: string) {
+  const owner = requireOwner(ctx);
+  const current = toFoodEstimate(entry);
+  try {
+    const simple = applySimpleFoodCorrections(current, correction);
+    let estimate = simple;
+    if (!estimate) {
+      if (ctx.chat?.id) await ctx.api.sendChatAction(ctx.chat.id, "typing");
+      const revised = await reviseFoodEstimate({ current, correction });
+      await writeAudit({
+        userId: owner.id,
+        action: "assistant.openai_usage",
+        entityType: "telegram_message",
+        entityId: ctx.dbMessageId,
+        details: {
+          capability: "food_correction",
+          model: revised.model,
+          succeeded: true,
+          inputTokens: revised.inputTokens,
+          outputTokens: revised.outputTokens,
+          totalTokens: revised.totalTokens,
+        },
+      }).catch(() => undefined);
+      estimate = revised.estimate.isFood ? revised.estimate : null;
+    }
+    if (!estimate) {
+      await replyAndRecord(ctx, "Не понял, что поправить. Напиши, например: «лаваш 50 г».");
+      return;
+    }
+    const updated = await updateFoodEntryEstimate({
+      userId: owner.id,
+      entryId: entry.id,
+      estimate,
+      correction,
+      at: new Date(),
+    });
+    if (!updated) return;
+    const day = await listFoodEntriesForDay({
+      userId: owner.id,
+      timezone: owner.timezone,
+      day: updated.eatenAt,
+    });
+    const card = await replyAndRecord(
+      ctx,
+      `✏️ Исправил.\n\n${formatFoodEstimateReply({
+        estimate,
+        dayTotals: sumFoodMacros(day),
+        dayCount: day.length,
+      })}`,
+      { reply_markup: foodCardKeyboard(entry.id) },
+    );
+    await setFoodEntryReplyMessage(entry.id, card.message_id);
+  } catch (error) {
+    logger.warn("Food correction failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    await replyAndRecord(ctx, "Не получилось пересчитать. Попробуй ещё раз чуть позже.");
+  }
 }
 
 async function renderFoodToday(ctx: BotContext) {

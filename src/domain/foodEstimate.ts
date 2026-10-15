@@ -166,3 +166,67 @@ function formatMeals(count: number) {
   if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${count} приёма`;
   return `${count} приёмов`;
 }
+
+const CORRECTION_FILLER = new Set(["было", "там", "где", "примерно", "грамм", "граммов", "гр"]);
+
+// "лаваш 50 г", "курицы 200 гр", "убери овощи": exact edits the user can expect to be
+// applied literally, by scaling the item. Anything vaguer returns null and goes to the AI.
+export function applySimpleFoodCorrections(
+  estimate: FoodEstimate,
+  text: string,
+): FoodEstimate | null {
+  const clauses = text
+    .toLocaleLowerCase("ru")
+    .replace(/ё/g, "е")
+    .split(/[,;\n]|\s+и\s+/)
+    .map((clause) => clause.trim().replace(/[.!]+$/, ""))
+    .filter(Boolean);
+  if (!clauses.length) return null;
+  const items = [...estimate.items];
+  for (const clause of clauses) {
+    const removal = clause.match(/^(?:убери|убрать|удали|без)\s+(.+)$/);
+    if (removal) {
+      const index = findFoodItem(items, removal[1]);
+      if (index < 0) return null;
+      items.splice(index, 1);
+      continue;
+    }
+    const grams = clause.match(/^(.+?)\s*[-—:]?\s*(\d+(?:[.,]\d+)?)\s*(?:г|гр|грамм[а-я]*)?$/);
+    if (!grams) return null;
+    const index = findFoodItem(items, grams[1]);
+    const value = Number(grams[2].replace(",", "."));
+    const item = items[index];
+    if (!item?.grams || !(value > 0)) return null;
+    const factor = value / item.grams;
+    items[index] = {
+      ...item,
+      grams: Math.round(value),
+      calories: Math.round(item.calories * factor),
+      proteinG: Math.round(item.proteinG * factor),
+      fatG: Math.round(item.fatG * factor),
+      carbsG: Math.round(item.carbsG * factor),
+    };
+  }
+  if (!items.length) return null;
+  return { ...estimate, items, ...sumFoodMacros(items) };
+}
+
+function findFoodItem(items: FoodItemEstimate[], phrase: string) {
+  const stems = phrase
+    .split(/[^а-яa-z]+/)
+    .filter((word) => word.length >= 3 && !CORRECTION_FILLER.has(word))
+    .map((word) => word.slice(0, 4));
+  if (!stems.length) return -1;
+  const matches = items
+    .map((item, index) => ({
+      index,
+      words: item.name
+        .toLocaleLowerCase("ru")
+        .replace(/ё/g, "е")
+        .split(/[^а-яa-z]+/)
+        .filter(Boolean)
+        .map((word) => word.slice(0, 4)),
+    }))
+    .filter(({ words }) => stems.every((stem) => words.includes(stem)));
+  return matches.length === 1 ? matches[0].index : -1;
+}

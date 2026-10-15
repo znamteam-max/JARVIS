@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  applySimpleFoodCorrections,
   formatFoodDaySummary,
   formatFoodEstimateReply,
   normalizeFoodEstimate,
@@ -76,6 +77,45 @@ describe("V3.1.0 food photo calorie log", () => {
     });
 
     expect(text).toContain("Не вижу на фото еды");
+  });
+
+  it("applies simple gram changes and removals without AI", () => {
+    // Production 2026-10-15: shawarma with 100 g of lavash that was really about half.
+    const shawarma = normalizeFoodEstimate({
+      isFood: true,
+      title: "Шаурма с курицей",
+      items: [
+        { name: "Курица нежирная", grams: 150, calories: 220, proteinG: 30, fatG: 5, carbsG: 0 },
+        { name: "Лаваш", grams: 100, calories: 280, proteinG: 8, fatG: 5, carbsG: 54 },
+        { name: "Овощи", grams: 50, calories: 25, proteinG: 1, fatG: 0, carbsG: 5 },
+      ],
+      confidence: "high",
+      note: null,
+    });
+
+    const lighter = applySimpleFoodCorrections(shawarma, "лаваша 50 гр, курицы 200 г");
+    expect(lighter?.items).toEqual([
+      { name: "Курица нежирная", grams: 200, calories: 293, proteinG: 40, fatG: 7, carbsG: 0 },
+      { name: "Лаваш", grams: 50, calories: 140, proteinG: 4, fatG: 3, carbsG: 27 },
+      { name: "Овощи", grams: 50, calories: 25, proteinG: 1, fatG: 0, carbsG: 5 },
+    ]);
+    expect(lighter?.calories).toBe(458);
+
+    const noVeg = applySimpleFoodCorrections(shawarma, "убери овощи");
+    expect(noVeg?.items.map((item) => item.name)).toEqual(["Курица нежирная", "Лаваш"]);
+    expect(noVeg?.calories).toBe(500);
+  });
+
+  it("leaves vague or additive corrections to the AI", () => {
+    const shawarma = normalizeFoodEstimate({
+      isFood: true,
+      title: "Шаурма",
+      items: [{ name: "Лаваш", grams: 100, calories: 280, proteinG: 8, fatG: 5, carbsG: 54 }],
+    });
+
+    expect(applySimpleFoodCorrections(shawarma, "курицы было больше")).toBeNull();
+    expect(applySimpleFoodCorrections(shawarma, "добавь соус 30 г")).toBeNull();
+    expect(applySimpleFoodCorrections(shawarma, "убери лаваш")).toBeNull();
   });
 
   it("lists the day's meals in local time", () => {

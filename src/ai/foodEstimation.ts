@@ -54,31 +54,59 @@ export type FoodEstimationResult = {
   totalTokens: number | null;
 };
 
-export async function estimateFoodFromImage(params: {
+export function estimateFoodFromImage(params: {
   bytes: Buffer;
   mimeType: string;
   caption: string | null;
 }): Promise<FoodEstimationResult> {
+  return callFoodEstimateTool({
+    instructions: FOOD_INSTRUCTIONS,
+    content: [
+      {
+        type: "input_text",
+        text: params.caption ? `Подпись пользователя: ${params.caption}` : "Подписи нет.",
+      },
+      {
+        type: "input_image",
+        image_url: `data:${params.mimeType};base64,${params.bytes.toString("base64")}`,
+        detail: "auto",
+      },
+    ],
+  });
+}
+
+const REVISION_INSTRUCTIONS = [
+  "Ты нутрициолог. Тебе дана текущая оценка блюда (JSON) и уточнение пользователя.",
+  "Исправь оценку: меняй только то, о чём говорит пользователь, остальные продукты оставь как есть.",
+  "Если меняется вес продукта — пересчитай его калории и БЖУ пропорционально.",
+  "«Было больше/меньше» без цифр — измени вес примерно на треть и скажи об этом в note.",
+  "Добавленный продукт оцени сам; убранный — удали. Ответь только вызовом report_food_estimate.",
+].join("\n");
+
+export function reviseFoodEstimate(params: {
+  current: FoodEstimate;
+  correction: string;
+}): Promise<FoodEstimationResult> {
+  return callFoodEstimateTool({
+    instructions: REVISION_INSTRUCTIONS,
+    content: [
+      {
+        type: "input_text",
+        text: `Текущая оценка: ${JSON.stringify(params.current)}\nУточнение пользователя: ${params.correction}`,
+      },
+    ],
+  });
+}
+
+async function callFoodEstimateTool(params: {
+  instructions: string;
+  content: Array<Record<string, unknown>>;
+}): Promise<FoodEstimationResult> {
   const model = getEnv().OPENAI_TEXT_MODEL;
   const response = await getOpenAIClient().responses.create({
     model,
-    instructions: FOOD_INSTRUCTIONS,
-    input: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "input_text",
-            text: params.caption ? `Подпись пользователя: ${params.caption}` : "Подписи нет.",
-          },
-          {
-            type: "input_image",
-            image_url: `data:${params.mimeType};base64,${params.bytes.toString("base64")}`,
-            detail: "auto",
-          },
-        ],
-      },
-    ],
+    instructions: params.instructions,
+    input: [{ role: "user", content: params.content }] as never,
     tools: [foodEstimateTool] as never,
     tool_choice: { type: "function", name: "report_food_estimate" } as never,
     parallel_tool_calls: false,
