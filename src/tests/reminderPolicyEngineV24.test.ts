@@ -137,6 +137,24 @@ describe("V2.4 reminder policy engine", () => {
     expect(mocks.createReminderIfMissing).toHaveBeenCalledTimes(1);
   });
 
+  it("does not revive a completed policy when an already queued reminder is delivered", async () => {
+    // Production 2026-10-15: an acknowledged NBA policy kept sending bare hourly cards.
+    mocks.getPolicyForReminder.mockResolvedValue({
+      policy: { ...makePolicy(), status: "completed", nextFireAt: null },
+      reminder: { id: "reminder-id" },
+    });
+
+    const result = await advancePolicyAfterDelivery(
+      "reminder-id",
+      new Date("2026-06-08T05:00:00.000Z"),
+    );
+
+    expect(result).toBeNull();
+    expect(mocks.markPolicyOccurrenceDelivered).toHaveBeenCalledTimes(1);
+    expect(mocks.updateReminderPolicy).not.toHaveBeenCalled();
+    expect(mocks.createReminderIfMissing).not.toHaveBeenCalled();
+  });
+
   it("restores a cancelled reminder when rematerializing the same policy slot", async () => {
     const policy = makePolicy();
     const scheduledAt = new Date("2026-06-08T05:00:00.000Z");

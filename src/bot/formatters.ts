@@ -242,7 +242,13 @@ export function formatReminderMessage(
   item?: PlannerItem | null,
   options?: { policy?: ReminderPolicy | null; now?: Date },
 ): string {
-  if (!item) return "Напоминание.";
+  if (!item) {
+    // Without an item the policy (or the reminder payload) still knows what this is about.
+    const payloadTitle = reminder.payload?.title;
+    const title =
+      options?.policy?.title ?? (typeof payloadTitle === "string" ? payloadTitle : null);
+    return title ? `Напоминание: ${title}` : "Напоминание.";
+  }
   const policy = options?.policy ?? null;
   const now = options?.now ?? new Date();
   const timezone = item.timezone || policy?.timezone || "Europe/Moscow";

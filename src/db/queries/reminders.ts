@@ -229,6 +229,7 @@ export async function isReminderStillDeliverable(params: { reminderId: string; n
       left join "assistant"."planner_items" i on i.id = r.planner_item_id
       where r.id = ${params.reminderId}::uuid
         and r.status = 'claimed'
+        and (p.id is null or p.status = 'active')
         and (p.snoozed_until is null or p.snoozed_until <= ${nowIso}::timestamptz)
         and (i.snoozed_until is null or i.snoozed_until <= ${nowIso}::timestamptz)
     ) as eligible

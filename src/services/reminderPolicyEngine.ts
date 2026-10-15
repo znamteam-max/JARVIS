@@ -243,6 +243,9 @@ export async function advancePolicyAfterDelivery(reminderId: string, deliveredAt
   await markPolicyOccurrenceDelivered(reminderId, deliveredAt);
   const policy = row.policy;
   if (row.reminder.purpose === "snooze") return policy;
+  // An already queued reminder can be delivered after the user acknowledged the policy;
+  // scheduling the next slot here revived completed policies forever.
+  if (policy.status !== "active") return null;
   const scheduledFor =
     row.occurrence?.scheduledFor ?? row.reminder.scheduledAt ?? policy.nextFireAt ?? deliveredAt;
   const next = computeNextPolicySlotAfterDelivery({
