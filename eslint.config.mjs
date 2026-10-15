@@ -9,6 +9,7 @@ const eslintConfig = [
       "coverage/**",
       "drizzle/meta/**",
       "cloudflare-reminder-worker/node_modules/**",
+      "cloudflare-media-worker/node_modules/**",
     ],
   },
   ...nextVitals,

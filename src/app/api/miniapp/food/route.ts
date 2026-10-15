@@ -13,6 +13,7 @@ import {
 import { scaleFoodItems } from "@/domain/miniapp";
 import { logger } from "@/lib/logger";
 import { resolveMiniAppOwner } from "@/lib/telegramWebApp";
+import { deleteFoodPhoto, saveFoodPhoto } from "@/services/foodPhotos";
 import { buildMiniAppSummary } from "@/services/miniappSummary";
 
 export const runtime = "nodejs";
@@ -35,8 +36,9 @@ export async function POST(request: Request) {
   }
   const caption = String(form?.get("caption") ?? "").trim() || null;
   try {
+    const bytes = Buffer.from(await photo.arrayBuffer());
     const result = await estimateFoodFromImage({
-      bytes: Buffer.from(await photo.arrayBuffer()),
+      bytes,
       mimeType: photo.type || "image/jpeg",
       caption,
     });
@@ -56,7 +58,7 @@ export async function POST(request: Request) {
     if (!result.estimate.isFood) {
       return NextResponse.json({ ok: false, error: "not_food" }, { status: 422 });
     }
-    await insertFoodEntry({
+    const entry = await insertFoodEntry({
       userId: owner.id,
       sourceMessageId: null,
       telegramFileId: null,
@@ -65,6 +67,7 @@ export async function POST(request: Request) {
       estimate: result.estimate,
       model: result.model,
     });
+    if (entry) await saveFoodPhoto({ entryId: entry.id, bytes });
   } catch (error) {
     logger.warn("Mini App food estimation failed", {
       error: error instanceof Error ? error.message : String(error),
@@ -103,6 +106,18 @@ export async function DELETE(request: Request) {
   if (!z.string().uuid().safeParse(id).success) {
     return NextResponse.json({ ok: false, error: "invalid" }, { status: 400 });
   }
-  await deleteFoodEntry({ userId: owner.id, entryId: id });
+  // ?what=photo removes only the picture; deleting the entry takes its picture along.
+  if (new URL(request.url).searchParams.get("what") !== "photo") {
+    await deleteFoodEntry({ userId: owner.id, entryId: id });
+  }
+  try {
+    await deleteFoodPhoto({ userId: owner.id, entryId: id });
+  } catch (error) {
+    logger.warn("Food photo delete failed", {
+      entryId: id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return NextResponse.json({ ok: false, error: "photo_delete_failed" }, { status: 502 });
+  }
   return NextResponse.json({ ok: true, summary: await buildMiniAppSummary(owner) });
 }

@@ -22,6 +22,7 @@ import {
 import { downloadTelegramMedia, TELEGRAM_DOWNLOAD_LIMIT_BYTES } from "@/integrations/telegramFiles";
 import { UserFacingError } from "@/lib/errors";
 import { logger } from "@/lib/logger";
+import { deleteFoodPhoto, saveFoodPhoto } from "@/services/foodPhotos";
 
 import type { BotContext } from "./context";
 import { requireOwner } from "./context";
@@ -93,7 +94,10 @@ export function registerFoodHandlers(bot: Bot<BotContext>) {
         }),
         entry ? { reply_markup: foodCardKeyboard(entry.id) } : undefined,
       );
-      if (entry) await setFoodEntryReplyMessage(entry.id, card.message_id);
+      if (entry) {
+        await setFoodEntryReplyMessage(entry.id, card.message_id);
+        await saveFoodPhoto({ entryId: entry.id, bytes });
+      }
     } catch (error) {
       logger.warn("Food photo estimation failed", {
         error: error instanceof Error ? error.message : String(error),
@@ -165,6 +169,7 @@ export function registerFoodHandlers(bot: Bot<BotContext>) {
   bot.callbackQuery(/^food:delete:([0-9a-f-]{36})$/, async (ctx) => {
     const owner = requireOwner(ctx);
     const deleted = await deleteFoodEntry({ userId: owner.id, entryId: ctx.match[1] });
+    await deleteFoodPhoto({ userId: owner.id, entryId: ctx.match[1] }).catch(() => false);
     await ctx.answerCallbackQuery(deleted ? "Удалил запись" : "Запись уже удалена");
     if (deleted) {
       await ctx

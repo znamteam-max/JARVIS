@@ -1,0 +1,14 @@
+{
+  "name": "jarvis-media",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260524.0",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.20.0"
+  }
+}

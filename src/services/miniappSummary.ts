@@ -4,9 +4,11 @@ import { listFitnessActivitiesSince, listWellnessDaysSince } from "@/db/queries/
 import { getNutritionGoals, listFoodEntriesSince } from "@/db/queries/food";
 import type { FoodEntry, User } from "@/db/schema";
 import { sumFoodMacros } from "@/domain/foodEstimate";
+import { signFoodPhotoUrl } from "@/domain/foodPhoto";
 import { formatWellnessSummary } from "@/domain/intervalsFitness";
 import { computeCalorieBudget, parsePlanSections } from "@/domain/miniapp";
 import { formatActivityCard } from "@/domain/stravaActivity";
+import { getEnv } from "@/lib/env";
 import { renderLiveDashboard } from "@/telegram/liveDashboard";
 
 const WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
@@ -44,6 +46,11 @@ export async function buildMiniAppSummary(user: User, now = new Date()) {
     return { label, date, calories, isToday: date === today, isFuture: date > today };
   });
   const loggedDays = week.filter((day) => !day.isFuture && day.calories > 0);
+  const photoSecret = getEnv().MEDIA_WORKER_TOKEN;
+  const photoUrl = (entry: FoodEntry) =>
+    entry.photoKey && photoSecret
+      ? signFoodPhotoUrl({ entryId: entry.id, secret: photoSecret, now })
+      : null;
   const weekActivities = activities.filter((a) => a.startAt >= weekStart.toUTC().toJSDate());
 
   return {
@@ -54,7 +61,24 @@ export async function buildMiniAppSummary(user: User, now = new Date()) {
     budget: computeCalorieBudget({ goals, eaten, workoutCalories }),
     plan: withEditableItems(plan, timezone),
     food: {
-      today: todayFood.map((entry) => foodView(entry, timezone)),
+      today: todayFood.map((entry) => ({
+        ...foodView(entry, timezone),
+        photoUrl: photoUrl(entry),
+      })),
+      // Newest first: every stored photo of the last 7+ days, so any of them can be removed.
+      photos: foodSince
+        .filter((entry) => entry.photoKey)
+        .reverse()
+        .map((entry) => ({
+          id: entry.id,
+          title: entry.title,
+          calories: entry.calories,
+          label: DateTime.fromJSDate(entry.eatenAt, { zone: "utc" })
+            .setZone(timezone)
+            .setLocale("ru")
+            .toFormat("ccc HH:mm"),
+          url: photoUrl(entry) ?? "",
+        })),
       week,
       averageCalories: loggedDays.length
         ? Math.round(loggedDays.reduce((sum, day) => sum + day.calories, 0) / loggedDays.length)

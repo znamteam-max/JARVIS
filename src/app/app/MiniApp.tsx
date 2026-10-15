@@ -15,6 +15,7 @@ type TelegramWebApp = {
   setHeaderColor?(color: string): void;
   setBackgroundColor?(color: string): void;
   addToHomeScreen?(): void;
+  showConfirm?(message: string, callback: (confirmed: boolean) => void): void;
 };
 declare global {
   interface Window {
@@ -30,6 +31,7 @@ const ERRORS: Record<string, string> = {
   reminders_not_understood:
     "Не понял напоминание. Напиши, например: «за час и за 15 минут» или «каждый час с 8 до 12».",
   not_found: "Этот пункт уже изменился. Обнови расписание.",
+  photo_delete_failed: "Не получилось удалить фото. Попробуй ещё раз.",
 };
 
 export function MiniApp() {
@@ -610,8 +612,52 @@ function FoodTab({ summary, busy, call }: { summary: MiniAppSummary; busy: boole
           </div>
         </div>
       </section>
+
+      {food.photos.length ? (
+        <section className={styles.card} aria-label="Фото еды за неделю">
+          <h2 className={styles.sectionTitle}>Фото за неделю · {food.photos.length}</h2>
+          <div className={styles.photoGrid}>
+            {food.photos.map((photo) => (
+              <figure key={photo.id} className={styles.photoTile}>
+                {/* eslint-disable-next-line @next/next/no-img-element -- signed private photo */}
+                <img src={photo.url} alt={photo.title} loading="lazy" />
+                <figcaption>
+                  {photo.label} · {photo.calories} ккал
+                </figcaption>
+                <button
+                  type="button"
+                  className={styles.photoRemove}
+                  aria-label={`Удалить фото: ${photo.title}`}
+                  disabled={busy}
+                  onClick={() => void removePhoto(call, photo.id)}
+                >
+                  ✕
+                </button>
+              </figure>
+            ))}
+          </div>
+          <span className={styles.caption}>
+            Фото хранятся сжатыми. Удаление стирает только снимок — запись и калории остаются.
+          </span>
+        </section>
+      ) : null}
     </>
   );
+}
+
+// Telegram's own dialog when available, the browser one otherwise.
+function confirmAction(message: string) {
+  return new Promise<boolean>((resolve) => {
+    const app = window.Telegram?.WebApp;
+    if (app?.showConfirm) app.showConfirm(message, resolve);
+    else resolve(window.confirm(message));
+  });
+}
+
+async function removePhoto(call: Call, id: string) {
+  if (await confirmAction("Удалить фото? Запись и калории останутся.")) {
+    await call(`/api/miniapp/food?id=${id}&what=photo`, { method: "DELETE" });
+  }
 }
 
 function FoodCard({
@@ -632,6 +678,10 @@ function FoodCard({
     );
   return (
     <section className={styles.card} aria-label={entry.title}>
+      {entry.photoUrl ? (
+        // eslint-disable-next-line @next/next/no-img-element -- signed private photo
+        <img className={styles.foodPhoto} src={entry.photoUrl} alt={entry.title} loading="lazy" />
+      ) : null}
       <div className={styles.header}>
         <span style={{ fontSize: 17, fontWeight: 600 }}>{entry.title}</span>
         <span className={styles.ringValue} style={{ fontSize: 18, color: "var(--accent)" }}>
@@ -690,13 +740,28 @@ function FoodCard({
             Сохранить
           </button>
         ) : null}
+        {entry.photoUrl ? (
+          <button
+            type="button"
+            className={styles.secondary}
+            disabled={busy}
+            onClick={() => void removePhoto(call, entry.id)}
+          >
+            Удалить фото
+          </button>
+        ) : null}
         <button
           type="button"
           className={styles.secondary}
           disabled={busy}
-          onClick={() => void call(`/api/miniapp/food?id=${entry.id}`, { method: "DELETE" })}
+          onClick={async () => {
+            const question = entry.photoUrl ? "Удалить запись вместе с фото?" : "Удалить запись?";
+            if (await confirmAction(question)) {
+              await call(`/api/miniapp/food?id=${entry.id}`, { method: "DELETE" });
+            }
+          }}
         >
-          Удалить
+          {entry.photoUrl ? "Удалить запись" : "Удалить"}
         </button>
       </div>
     </section>

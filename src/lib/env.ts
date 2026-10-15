@@ -37,6 +37,8 @@ const envSchema = z.object({
   STRAVA_CLIENT_SECRET: z.string().optional(),
   INTERVALS_API_KEY: z.string().optional(),
   INTERVALS_ATHLETE_ID: z.string().default("0"),
+  MEDIA_WORKER_URL: z.string().url().optional(),
+  MEDIA_WORKER_TOKEN: z.string().optional(),
   CALENDAR_PROVIDER: z.enum(["none", "google", "yandex"]).default("none"),
   YANDEX_CALDAV_URL: z.string().url().default("https://caldav.yandex.ru"),
   YANDEX_CALDAV_USERNAME: z.string().optional(),
@@ -104,6 +106,11 @@ export function isStravaConfigured(): boolean {
 
 export function isIntervalsConfigured(): boolean {
   return Boolean(getEnv().INTERVALS_API_KEY);
+}
+
+export function isMediaStoreConfigured(): boolean {
+  const env = getEnv();
+  return Boolean(env.MEDIA_WORKER_URL && env.MEDIA_WORKER_TOKEN);
 }
 
 export function isYandexCalendarConfigured(): boolean {

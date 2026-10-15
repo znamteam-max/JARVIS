@@ -693,6 +693,9 @@ export const foodEntries = assistantTable(
       onDelete: "set null",
     }),
     telegramFileId: text("telegram_file_id"),
+    // Compressed copy in Cloudflare R2 (jarvis-media worker); status stored|deleted|failed.
+    photoKey: text("photo_key"),
+    photoStatus: text("photo_status"),
     caption: text("caption"),
     title: text("title").notNull(),
     eatenAt: timestamp("eaten_at", { withTimezone: true }).notNull(),

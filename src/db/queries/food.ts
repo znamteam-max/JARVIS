@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import { DateTime } from "luxon";
 
 import { getDb } from "../client";
@@ -215,4 +215,47 @@ export async function getFoodEntryById(params: { userId: string; entryId: string
     )
     .limit(1);
   return row ?? null;
+}
+
+export async function setFoodEntryPhoto(params: {
+  entryId: string;
+  photoKey: string | null;
+  photoStatus: "stored" | "deleted" | "failed";
+}) {
+  await getDb()
+    .update(foodEntries)
+    .set({ photoKey: params.photoKey, photoStatus: params.photoStatus, updatedAt: new Date() })
+    .where(eq(foodEntries.id, params.entryId));
+}
+
+// Any status: a deleted entry still owns its stored photo until the photo is removed.
+export async function getFoodEntryPhoto(entryId: string) {
+  const [row] = await getDb()
+    .select({
+      id: foodEntries.id,
+      userId: foodEntries.userId,
+      status: foodEntries.status,
+      photoKey: foodEntries.photoKey,
+    })
+    .from(foodEntries)
+    .where(eq(foodEntries.id, entryId))
+    .limit(1);
+  return row ?? null;
+}
+
+// Bot photos whose upload never happened (older entries, or the store was down).
+export async function listFoodEntriesMissingPhoto(params: { since: Date; limit: number }) {
+  return getDb()
+    .select({ id: foodEntries.id, telegramFileId: foodEntries.telegramFileId })
+    .from(foodEntries)
+    .where(
+      and(
+        eq(foodEntries.status, "active"),
+        isNotNull(foodEntries.telegramFileId),
+        isNull(foodEntries.photoStatus),
+        gte(foodEntries.createdAt, params.since),
+      ),
+    )
+    .orderBy(desc(foodEntries.createdAt))
+    .limit(params.limit);
 }
