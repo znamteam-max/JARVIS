@@ -2,8 +2,9 @@ import { and, asc, desc, eq, gte, lt, sql } from "drizzle-orm";
 import { DateTime } from "luxon";
 
 import { getDb } from "../client";
-import { foodEntries } from "../schema";
+import { foodEntries, nutritionGoals } from "../schema";
 import type { FoodEstimate } from "@/domain/foodEstimate";
+import { DEFAULT_NUTRITION_GOALS, type NutritionGoals } from "@/domain/miniapp";
 
 export async function insertFoodEntry(params: {
   userId: string;
@@ -157,6 +158,61 @@ export async function findFoodEntryForCorrection(params: {
     .from(foodEntries)
     .where(and(eq(foodEntries.userId, params.userId), eq(foodEntries.status, "active"), target))
     .orderBy(desc(foodEntries.updatedAt))
+    .limit(1);
+  return row ?? null;
+}
+
+export async function getNutritionGoals(userId: string): Promise<NutritionGoals> {
+  const [row] = await getDb()
+    .select()
+    .from(nutritionGoals)
+    .where(eq(nutritionGoals.userId, userId))
+    .limit(1);
+  if (!row) return DEFAULT_NUTRITION_GOALS;
+  return {
+    calories: row.calories,
+    proteinG: row.proteinG,
+    fatG: row.fatG,
+    carbsG: row.carbsG,
+    workoutPercent: ([0, 50, 100].includes(row.workoutPercent)
+      ? row.workoutPercent
+      : 50) as NutritionGoals["workoutPercent"],
+  };
+}
+
+export async function saveNutritionGoals(userId: string, goals: NutritionGoals) {
+  const values = { userId, ...goals, updatedAt: new Date() };
+  await getDb()
+    .insert(nutritionGoals)
+    .values(values)
+    .onConflictDoUpdate({ target: nutritionGoals.userId, set: values });
+}
+
+export async function listFoodEntriesSince(params: { userId: string; since: Date }) {
+  return getDb()
+    .select()
+    .from(foodEntries)
+    .where(
+      and(
+        eq(foodEntries.userId, params.userId),
+        eq(foodEntries.status, "active"),
+        gte(foodEntries.eatenAt, params.since),
+      ),
+    )
+    .orderBy(asc(foodEntries.eatenAt));
+}
+
+export async function getFoodEntryById(params: { userId: string; entryId: string }) {
+  const [row] = await getDb()
+    .select()
+    .from(foodEntries)
+    .where(
+      and(
+        eq(foodEntries.id, params.entryId),
+        eq(foodEntries.userId, params.userId),
+        eq(foodEntries.status, "active"),
+      ),
+    )
     .limit(1);
   return row ?? null;
 }

@@ -1,0 +1,114 @@
+import { DateTime } from "luxon";
+
+import { listFitnessActivitiesSince, listWellnessDaysSince } from "@/db/queries/fitness";
+import { getNutritionGoals, listFoodEntriesSince } from "@/db/queries/food";
+import type { FoodEntry, User } from "@/db/schema";
+import { sumFoodMacros } from "@/domain/foodEstimate";
+import { formatWellnessSummary } from "@/domain/intervalsFitness";
+import { computeCalorieBudget, parsePlanSections } from "@/domain/miniapp";
+import { formatActivityCard } from "@/domain/stravaActivity";
+import { renderLiveDashboard } from "@/telegram/liveDashboard";
+
+const WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+
+export type MiniAppSummary = Awaited<ReturnType<typeof buildMiniAppSummary>>;
+
+// One payload for the whole Mini App: every tab renders from it, every mutation returns it.
+export async function buildMiniAppSummary(user: User, now = new Date()) {
+  const timezone = user.timezone;
+  const local = DateTime.fromJSDate(now, { zone: "utc" }).setZone(timezone).setLocale("ru");
+  const today = local.toISODate() ?? "";
+  const weekStart = local.startOf("week");
+  const since = DateTime.min(weekStart, local.startOf("day").minus({ days: 6 }));
+
+  const [goals, foodSince, plan, activities, wellness] = await Promise.all([
+    getNutritionGoals(user.id),
+    listFoodEntriesSince({ userId: user.id, since: since.toUTC().toJSDate() }),
+    renderLiveDashboard({ userId: user.id, timezone, now, readOnly: true }),
+    listFitnessActivitiesSince(user.id, since.toUTC().toJSDate()),
+    listWellnessDaysSince(user.id, local.minus({ days: 7 }).toISODate() ?? ""),
+  ]);
+
+  const dayOf = (date: Date) =>
+    DateTime.fromJSDate(date, { zone: "utc" }).setZone(timezone).toISODate() ?? "";
+  const todayFood = foodSince.filter((entry) => dayOf(entry.eatenAt) === today);
+  const todayWorkouts = activities.filter((activity) => dayOf(activity.startAt) === today);
+  const workoutCalories = todayWorkouts.reduce((sum, a) => sum + (a.calories ?? 0), 0);
+  const eaten = sumFoodMacros(todayFood);
+
+  const week = WEEKDAYS.map((label, index) => {
+    const date = weekStart.plus({ days: index }).toISODate() ?? "";
+    const calories = foodSince
+      .filter((entry) => dayOf(entry.eatenAt) === date)
+      .reduce((sum, entry) => sum + entry.calories, 0);
+    return { label, date, calories, isToday: date === today, isFuture: date > today };
+  });
+  const loggedDays = week.filter((day) => !day.isFuture && day.calories > 0);
+  const weekActivities = activities.filter((a) => a.startAt >= weekStart.toUTC().toJSDate());
+
+  return {
+    dateLabel: local.toFormat("cccc, d MMMM"),
+    goals,
+    eaten,
+    workoutCalories,
+    budget: computeCalorieBudget({ goals, eaten, workoutCalories }),
+    plan: parsePlanSections(plan.text),
+    food: {
+      today: todayFood.map((entry) => foodView(entry, timezone)),
+      week,
+      averageCalories: loggedDays.length
+        ? Math.round(loggedDays.reduce((sum, day) => sum + day.calories, 0) / loggedDays.length)
+        : 0,
+      daysInTarget: loggedDays.filter(
+        (day) => Math.abs(day.calories - goals.calories) <= goals.calories * 0.05,
+      ).length,
+      loggedDays: loggedDays.length,
+    },
+    fitness: {
+      count: weekActivities.length,
+      movingTimeS: weekActivities.reduce((sum, a) => sum + a.movingTimeS, 0),
+      distanceM: weekActivities.reduce((sum, a) => sum + a.distanceM, 0),
+      calories: weekActivities.reduce((sum, a) => sum + (a.calories ?? 0), 0),
+      activities: activities.map((activity) => {
+        const [title = "", metrics = "", extra = ""] = formatActivityCard(activity).split("\n");
+        return {
+          id: activity.id,
+          day: WEEKDAYS[DateTime.fromJSDate(activity.startAt).setZone(timezone).weekday - 1],
+          title,
+          metrics,
+          extra,
+        };
+      }),
+      wellnessText: formatWellnessSummary(
+        wellness.map((day) => ({ ...day, raw: day.raw as Record<string, unknown> })),
+      ),
+      latestWellness: wellness[0]
+        ? {
+            day: wellness[0].day,
+            sleepSecs: wellness[0].sleepSecs,
+            sleepScore: wellness[0].sleepScore,
+            hrv: wellness[0].hrv,
+            restingHr: wellness[0].restingHr,
+          }
+        : null,
+    },
+  };
+}
+
+function foodView(entry: FoodEntry, timezone: string) {
+  return {
+    id: entry.id,
+    title: entry.title,
+    time: DateTime.fromJSDate(entry.eatenAt, { zone: "utc" }).setZone(timezone).toFormat("HH:mm"),
+    calories: entry.calories,
+    proteinG: entry.proteinG,
+    fatG: entry.fatG,
+    carbsG: entry.carbsG,
+    confidence: entry.confidence,
+    items: (entry.items as Array<Record<string, unknown>>).map((item) => ({
+      name: String(item.name ?? ""),
+      grams: typeof item.grams === "number" ? item.grams : null,
+      calories: Number(item.calories ?? 0),
+    })),
+  };
+}

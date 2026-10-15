@@ -851,3 +851,15 @@ export const integrationSyncState = assistantTable("integration_sync_state", {
 
 export type FitnessActivity = typeof fitnessActivities.$inferSelect;
 export type WellnessDay = typeof wellnessDays.$inferSelect;
+
+export const nutritionGoals = assistantTable("nutrition_goals", {
+  userId: uuid("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  calories: integer("calories").notNull().default(2100),
+  proteinG: integer("protein_g").notNull().default(150),
+  fatG: integer("fat_g").notNull().default(70),
+  carbsG: integer("carbs_g").notNull().default(215),
+  workoutPercent: integer("workout_percent").notNull().default(50),
+  ...timestamps,
+});

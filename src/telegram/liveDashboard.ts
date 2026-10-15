@@ -69,6 +69,8 @@ export async function renderLiveDashboard(params: {
   userId: string;
   timezone: string;
   now?: Date;
+  // The Mini App reads the same plan; it must not renumber the chat's plan or log a render.
+  readOnly?: boolean;
 }) {
   const now = params.now ?? new Date();
   const local = DateTime.fromJSDate(now, { zone: "utc" }).setZone(params.timezone).setLocale("ru");
@@ -200,9 +202,7 @@ export async function renderLiveDashboard(params: {
     .slice(0, 5);
   const unresolvedItems = [
     ...pastTodayItems,
-    ...unresolvedPastRows
-      .map((row) => row.item!)
-      .filter((item) => !pastTodayIds.has(item.id)),
+    ...unresolvedPastRows.map((row) => row.item!).filter((item) => !pastTodayIds.has(item.id)),
   ].slice(0, 5);
   const carryoverItems = unresolvedItems.filter(
     (item) => item.metadata?.untilDoneCarryover === true,
@@ -394,6 +394,17 @@ export async function renderLiveDashboard(params: {
     pushRows(itemRowsFor(fallback, true));
   }
   if (refs.length) lines.push("", "Нажми номер, чтобы открыть пункт.");
+
+  if (params.readOnly) {
+    return {
+      text: lines.join("\n"),
+      items: orderedItems,
+      policies: displayPolicies,
+      keyboard: entityListKeyboard(refs, true),
+      viewState: null,
+      conflicts,
+    };
+  }
 
   const viewState = await rememberTaskView({
     userId: params.userId,

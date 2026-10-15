@@ -1,3 +1,4 @@
+import { getEnv } from "@/lib/env";
 import { Bot, InputFile } from "grammy";
 
 import { requireEnv } from "@/lib/env";
@@ -278,6 +279,25 @@ export function createBot() {
       timezone: owner.timezone,
     });
     await ctx.reply(usage.text);
+  });
+
+  // Opens the Mini App and pins it as the chat's menu button for one-tap access.
+  instance.command("app", async (ctx) => {
+    const url = `${getEnv().NEXT_PUBLIC_APP_URL}/app`;
+    if (ctx.chat?.id) {
+      await ctx.api
+        .setChatMenuButton({
+          chat_id: ctx.chat.id,
+          menu_button: { type: "web_app", text: "JARVIS", web_app: { url } },
+        })
+        .catch(() => undefined);
+    }
+    await ctx.reply(
+      "JARVIS: калории, расписание и тренировки. Кнопка «JARVIS» теперь всегда рядом с полем ввода.",
+      {
+        reply_markup: { inline_keyboard: [[{ text: "Открыть JARVIS", web_app: { url } }]] },
+      },
+    );
   });
 
   registerFoodHandlers(instance);
