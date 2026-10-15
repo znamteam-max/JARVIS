@@ -33,6 +33,8 @@ const envSchema = z.object({
   GOOGLE_REDIRECT_URI: z.string().url().default("http://localhost:3000/api/google/oauth/callback"),
   GOOGLE_CALENDAR_ID: z.string().default("primary"),
   GOOGLE_TOKEN_ENCRYPTION_KEY: z.string().optional(),
+  STRAVA_CLIENT_ID: z.string().optional(),
+  STRAVA_CLIENT_SECRET: z.string().optional(),
   CALENDAR_PROVIDER: z.enum(["none", "google", "yandex"]).default("none"),
   YANDEX_CALDAV_URL: z.string().url().default("https://caldav.yandex.ru"),
   YANDEX_CALDAV_USERNAME: z.string().optional(),
@@ -91,6 +93,11 @@ function validateTimezone(name: string, timezone: string) {
 export function isGoogleCalendarConfigured(): boolean {
   const env = getEnv();
   return Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.GOOGLE_REDIRECT_URI);
+}
+
+export function isStravaConfigured(): boolean {
+  const env = getEnv();
+  return Boolean(env.STRAVA_CLIENT_ID && env.STRAVA_CLIENT_SECRET && env.APP_ENCRYPTION_KEY);
 }
 
 export function isYandexCalendarConfigured(): boolean {

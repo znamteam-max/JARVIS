@@ -29,6 +29,7 @@ import { attachOwner, requireAllowedOwner } from "./authorization";
 import { registerCallbacks } from "./callbacks";
 import { registerCommands } from "./commands";
 import { registerFoodHandlers } from "./foodHandlers";
+import { registerStravaHandlers } from "./stravaHandlers";
 import { registerMessageHandlers } from "./messageHandlers";
 import { recordUpdateOnce } from "./updateRecorder";
 import { stabilityScheduleReminderMenuKeyboard } from "./stabilityKeyboards";
@@ -283,6 +284,7 @@ export function createBot() {
   });
 
   registerFoodHandlers(instance);
+  registerStravaHandlers(instance);
   registerCommands(instance);
   registerCallbacks(instance);
   registerMessageHandlers(instance);

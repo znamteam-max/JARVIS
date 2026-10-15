@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { runDueReminders } from "@/jobs/runDueReminders";
+import { syncStravaIfDue } from "@/services/stravaSync";
 import { requireEnv } from "@/lib/env";
 import { constantTimeEquals } from "@/lib/secrets";
 
@@ -15,5 +16,7 @@ export async function POST(request: Request) {
   }
 
   const result = await runDueReminders();
-  return NextResponse.json({ ok: true, ...result });
+  // Piggybacks on the scheduler tick; never lets a Strava problem fail reminders.
+  const strava = await syncStravaIfDue().catch(() => ({ synced: false }));
+  return NextResponse.json({ ok: true, ...result, strava });
 }
