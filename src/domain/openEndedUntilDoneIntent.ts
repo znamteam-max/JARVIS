@@ -49,9 +49,7 @@ export function detectOpenEndedUntilDoneIntent(params: {
 
   const nowLocal = DateTime.fromJSDate(params.now, { zone: "utc" }).setZone(params.timezone);
   const firstReminder = nowLocal.plus({ minutes: 5 }).startOf("minute");
-  const todayOnly = /(?:^|[\s,;:—-])сегодня(?=$|[\s,;:—-])|до\s+конца\s+дня/i.test(
-    normalized,
-  );
+  const todayOnly = /(?:^|[\s,;:—-])сегодня(?=$|[\s,;:—-])|до\s+конца\s+дня/i.test(normalized);
   const windowEnd = todayOnly
     ? nowLocal.set({ hour: 23, minute: 59, second: 0, millisecond: 0 })
     : null;

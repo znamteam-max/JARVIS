@@ -268,10 +268,7 @@ export function formatReminderMessage(
     const rule = formatRecurringRuleHuman(policy?.recurrenceRule ?? null);
     return `Напоминание: ${item.title}\nСегодня, ${nowLocal.toFormat("dd.LL")}. Правило: ${rule}.`;
   }
-  if (
-    isTodayUntilDoneReminderPolicy(policy) ||
-    isTodayUntilDonePlannerItem(item)
-  ) {
+  if (isTodayUntilDoneReminderPolicy(policy) || isTodayUntilDonePlannerItem(item)) {
     const itemDate = item.dueAt ?? item.startAt;
     const itemLocal = itemDate
       ? DateTime.fromJSDate(itemDate, { zone: "utc" }).setZone(timezone)

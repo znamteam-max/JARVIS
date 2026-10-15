@@ -84,11 +84,7 @@ export function createBot() {
   instance.use(async (ctx, next) => {
     const text = ctx.message?.text ?? ctx.editedMessage?.text ?? "";
     if (text && !text.trim().startsWith("/") && ctx.owner?.id) {
-      const handled = await handleRecurringScheduleEditTurn(
-        ctx,
-        text,
-        ctx.owner.timezone,
-      );
+      const handled = await handleRecurringScheduleEditTurn(ctx, text, ctx.owner.timezone);
       if (handled) return;
     }
     await next();

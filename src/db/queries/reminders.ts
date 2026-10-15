@@ -3,7 +3,12 @@ import { and, desc, eq, gte, inArray, lt, or, sql } from "drizzle-orm";
 import { planPolicySnooze } from "@/domain/reminderPolicySchedule";
 import { findNextAvailableReminderSlot } from "@/services/reminderCollisionSpacing";
 import { writeAudit } from "@/db/queries/audit";
-import { normalizeClaimedReminder, reminderTimestamp, ReminderTimestampError, type RawClaimedReminder } from "@/db/reminderTimestampBoundary";
+import {
+  normalizeClaimedReminder,
+  reminderTimestamp,
+  ReminderTimestampError,
+  type RawClaimedReminder,
+} from "@/db/reminderTimestampBoundary";
 
 import { getDb } from "../client";
 import {
@@ -515,7 +520,12 @@ export async function createReminderIfMissing(params: {
         desiredAt: params.scheduledAt,
         latestAt: params.spacingLatestAt,
       });
-  const payload = withSpacingPayload(params.payload ?? {}, params.scheduledAt, spacing, params.idempotencyKey);
+  const payload = withSpacingPayload(
+    params.payload ?? {},
+    params.scheduledAt,
+    spacing,
+    params.idempotencyKey,
+  );
   const [row] = await getDb()
     .insert(reminders)
     .values({
@@ -630,19 +640,29 @@ function withSpacingPayload(
     // Payloads are copied by recurring/repeat writers. A new occurrence must not
     // inherit a previous occurrence's authoritative snooze or once-only spacing.
     scheduleOccurrenceKey: occurrenceKey,
-    userExplicitSnooze: /:(policy_snooze|snooze|snooze_until|item_snooze_until):/.test(occurrenceKey),
+    userExplicitSnooze: /:(policy_snooze|snooze|snooze_until|item_snooze_until):/.test(
+      occurrenceKey,
+    ),
     spacingAlreadyApplied: spacing.shifted,
     finalScheduledAt: spacing.scheduledAt.toISOString(),
     metadata: {
       ...metadata,
       originalDesiredAt: desiredAt.toISOString(),
       spacingShiftMinutes: spacing.shiftMinutes,
-      spacingReason: spacing.shifted ? "collision_avoidance" : spacing.blockedReason ? "collision_avoidance_blocked" : null,
+      spacingReason: spacing.shifted
+        ? "collision_avoidance"
+        : spacing.blockedReason
+          ? "collision_avoidance_blocked"
+          : null,
       spacingBlockedReason: spacing.blockedReason ?? null,
     },
     originalDesiredAt: desiredAt.toISOString(),
     spacingShiftMinutes: spacing.shiftMinutes,
-    spacingReason: spacing.shifted ? "collision_avoidance" : spacing.blockedReason ? "collision_avoidance_blocked" : null,
+    spacingReason: spacing.shifted
+      ? "collision_avoidance"
+      : spacing.blockedReason
+        ? "collision_avoidance_blocked"
+        : null,
   };
 }
 

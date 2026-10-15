@@ -10,10 +10,7 @@ import {
   markPolicyOccurrenceDelivered,
   updateReminderPolicy,
 } from "@/db/queries/reminderPolicies";
-import {
-  createReminderIfMissing,
-  restoreReminderByIdempotencyKey,
-} from "@/db/queries/reminders";
+import { createReminderIfMissing, restoreReminderByIdempotencyKey } from "@/db/queries/reminders";
 import type { PlannerItem, ReminderPolicy } from "@/db/schema";
 import { localIsoToUtcDate } from "@/domain/dateTime";
 import {
@@ -208,8 +205,7 @@ function inferPolicyProposalMetadata(
     proposal.policyType !== "nag_until_ack" ||
     proposal.requireAck !== true ||
     !proposal.endsAtLocal ||
-    (proposal.category !== "nag_until_done" &&
-      proposal.onWindowEnd !== "move_to_overdue_or_review")
+    (proposal.category !== "nag_until_done" && proposal.onWindowEnd !== "move_to_overdue_or_review")
   ) {
     return {};
   }
