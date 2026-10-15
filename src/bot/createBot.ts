@@ -29,6 +29,7 @@ import { attachOwner, requireAllowedOwner } from "./authorization";
 import { registerCallbacks } from "./callbacks";
 import { registerCommands } from "./commands";
 import { registerFoodHandlers } from "./foodHandlers";
+import { registerFitnessHandlers } from "./fitnessHandlers";
 import { registerStravaHandlers } from "./stravaHandlers";
 import { registerMessageHandlers } from "./messageHandlers";
 import { recordUpdateOnce } from "./updateRecorder";
@@ -281,6 +282,7 @@ export function createBot() {
 
   registerFoodHandlers(instance);
   registerStravaHandlers(instance);
+  registerFitnessHandlers(instance);
   registerCommands(instance);
   registerCallbacks(instance);
   registerMessageHandlers(instance);

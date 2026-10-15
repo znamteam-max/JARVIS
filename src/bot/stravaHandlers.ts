@@ -17,8 +17,8 @@ import { requireOwner } from "./context";
 import { replyAndRecord } from "./reply";
 
 export function registerStravaHandlers(bot: Bot<BotContext>) {
-  bot.command(["strava", "workouts"], async (ctx) => renderStrava(ctx));
-  bot.hears(/^(?:strava|страва|тренировки)[.!?]?$/i, async (ctx) => renderStrava(ctx));
+  bot.command("strava", async (ctx) => renderStrava(ctx));
+  bot.hears(/^(?:strava|страва)[.!?]?$/i, async (ctx) => renderStrava(ctx));
 
   bot.callbackQuery("strava:week", async (ctx) => {
     await ctx.answerCallbackQuery();

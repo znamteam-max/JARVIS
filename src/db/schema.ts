@@ -789,3 +789,65 @@ export type ReleaseNotification = typeof releaseNotifications.$inferSelect;
 export type FoodEntry = typeof foodEntries.$inferSelect;
 export type StravaConnection = typeof stravaConnections.$inferSelect;
 export type StravaActivity = typeof stravaActivities.$inferSelect;
+
+export const fitnessActivities = assistantTable(
+  "fitness_activities",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    source: text("source").notNull(),
+    externalId: text("external_id").notNull(),
+    name: text("name").notNull(),
+    sportType: text("sport_type").notNull(),
+    startAt: timestamp("start_at", { withTimezone: true }).notNull(),
+    distanceM: integer("distance_m").notNull().default(0),
+    movingTimeS: integer("moving_time_s").notNull().default(0),
+    elapsedTimeS: integer("elapsed_time_s").notNull().default(0),
+    elevationGainM: integer("elevation_gain_m").notNull().default(0),
+    averageHeartrate: integer("average_heartrate"),
+    maxHeartrate: integer("max_heartrate"),
+    calories: integer("calories"),
+    trainingLoad: integer("training_load"),
+    raw: jsonb("raw").$type<Record<string, unknown>>().notNull().default(emptyJson),
+    notifiedAt: timestamp("notified_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("fitness_activities_source_external_idx").on(table.source, table.externalId),
+    index("fitness_activities_user_start_idx").on(table.userId, table.startAt),
+  ],
+);
+
+export const wellnessDays = assistantTable(
+  "wellness_days",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    source: text("source").notNull(),
+    day: text("day").notNull(),
+    restingHr: integer("resting_hr"),
+    hrv: integer("hrv"),
+    sleepSecs: integer("sleep_secs"),
+    sleepScore: integer("sleep_score"),
+    steps: integer("steps"),
+    raw: jsonb("raw").$type<Record<string, unknown>>().notNull().default(emptyJson),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("wellness_days_user_source_day_idx").on(table.userId, table.source, table.day),
+  ],
+);
+
+export const integrationSyncState = assistantTable("integration_sync_state", {
+  key: text("key").primaryKey(),
+  lastSyncAt: timestamp("last_sync_at", { withTimezone: true }),
+  lastError: text("last_error"),
+  ...timestamps,
+});
+
+export type FitnessActivity = typeof fitnessActivities.$inferSelect;
+export type WellnessDay = typeof wellnessDays.$inferSelect;
