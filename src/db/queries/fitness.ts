@@ -111,3 +111,17 @@ export async function setIntegrationSyncState(key: string, at: Date, error: stri
     .values(values)
     .onConflictDoUpdate({ target: integrationSyncState.key, set: values });
 }
+
+export async function deleteManualFitnessActivity(params: { userId: string; id: string }) {
+  const [row] = await getDb()
+    .delete(fitnessActivities)
+    .where(
+      and(
+        eq(fitnessActivities.id, params.id),
+        eq(fitnessActivities.userId, params.userId),
+        eq(fitnessActivities.source, "manual"),
+      ),
+    )
+    .returning({ id: fitnessActivities.id });
+  return row ?? null;
+}

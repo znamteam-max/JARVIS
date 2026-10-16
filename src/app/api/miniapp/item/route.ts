@@ -11,6 +11,12 @@ import {
   type ItemEditMutation,
 } from "@/services/itemEditMutations";
 import { buildMiniAppSummary } from "@/services/miniappSummary";
+import {
+  AppCreateError,
+  createPlannerItemFromApp,
+  REMINDER_CHOICES,
+  type ReminderChoice,
+} from "@/services/miniappCreate";
 import { completePlannerItemFromApp } from "@/services/plannerItemComplete";
 import { deletePlannerItemEverywhere } from "@/services/plannerItemDelete";
 
@@ -111,13 +117,65 @@ export async function DELETE(request: Request) {
   });
 }
 
-const actionSchema = z.object({ id: z.string().uuid(), action: z.literal("done") });
+const doneSchema = z.object({ id: z.string().uuid(), action: z.literal("done") });
 
-// "Сделал": a recurring task closes only this round, anything else is completed.
+const createSchema = z.object({
+  action: z.literal("create"),
+  kind: z.enum(["task", "event", "training"]),
+  title: z.string().trim().min(1).max(300),
+  dateLocal: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .nullable(),
+  timeLocal: z
+    .string()
+    .regex(/^\d{2}:\d{2}$/)
+    .nullable(),
+  durationMinutes: z
+    .number()
+    .int()
+    .min(5)
+    .max(24 * 60),
+  reminders: z
+    .array(z.enum(Object.keys(REMINDER_CHOICES) as [ReminderChoice, ...ReminderChoice[]]))
+    .max(5),
+  remindersText: z.string().trim().max(300).nullable().optional(),
+});
+
+// "Сделал" (a recurring task closes only this round) or "Добавить" from the home screen.
 export async function POST(request: Request) {
   const owner = await resolveMiniAppOwner(request);
   if (!owner) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  const body = actionSchema.safeParse(await request.json().catch(() => null));
+  const raw: unknown = await request.json().catch(() => null);
+  const create = createSchema.safeParse(raw);
+  if (create.success) {
+    try {
+      const { item, extraUnderstood } = await createPlannerItemFromApp({
+        user: owner,
+        ...create.data,
+      });
+      const when = item.startAt ?? item.dueAt;
+      const whenText = when
+        ? ` — ${DateTime.fromJSDate(when, { zone: "utc" })
+            .setZone(owner.timezone)
+            .setLocale("ru")
+            .toFormat("ccc d MMMM, HH:mm")}`
+        : "";
+      const warning =
+        extraUnderstood === false ? " Своё напоминание не понял — поправь в «Изменить»." : "";
+      return NextResponse.json({
+        ok: true,
+        message: `Добавил «${item.title}»${whenText}.${warning}`,
+        summary: await buildMiniAppSummary(owner),
+      });
+    } catch (error) {
+      if (error instanceof AppCreateError) {
+        return NextResponse.json({ ok: false, error: error.code }, { status: 400 });
+      }
+      throw error;
+    }
+  }
+  const body = doneSchema.safeParse(raw);
   if (!body.success) return NextResponse.json({ ok: false, error: "invalid" }, { status: 400 });
   const result = await completePlannerItemFromApp({
     userId: owner.id,

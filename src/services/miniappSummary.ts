@@ -100,6 +100,7 @@ export async function buildMiniAppSummary(user: User, now = new Date()) {
         const [title = "", metrics = "", extra = ""] = formatActivityCard(activity).split("\n");
         return {
           id: activity.id,
+          manual: activity.source === "manual",
           day: WEEKDAYS[DateTime.fromJSDate(activity.startAt).setZone(timezone).weekday - 1],
           title,
           metrics,

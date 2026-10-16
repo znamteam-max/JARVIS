@@ -188,7 +188,9 @@ export function MiniApp() {
         ) : null}
         {summary && tab === "plan" ? <PlanTab summary={summary} call={call} busy={busy} /> : null}
         {summary && tab === "food" ? <FoodTab summary={summary} busy={busy} call={call} /> : null}
-        {summary && tab === "fitness" ? <FitnessTab summary={summary} /> : null}
+        {summary && tab === "fitness" ? (
+          <FitnessTab summary={summary} call={call} busy={busy} />
+        ) : null}
       </div>
       <nav className={needsLogin ? styles.hidden : styles.tabbar} aria-label="Разделы">
         {(
@@ -229,6 +231,19 @@ function kcal(value: number) {
   return Math.round(value).toLocaleString("ru-RU");
 }
 
+type Sheet = "schedule" | "food" | "workout" | "settings";
+
+const SHEET_TITLES: Record<Sheet, string> = {
+  schedule: "Добавить в расписание",
+  food: "Добавить еду",
+  workout: "Добавить тренировку",
+  settings: "Настройки",
+};
+
+const TODAY_SECTIONS = /^(Сейчас|Сегодня|Не закрыто|Просрочено|Требует|Прошло)/;
+const UPCOMING_SECTIONS = /^(Завтра|Скоро|Позже)/;
+
+// Home: calories, three quick "add" buttons, then today and what comes next.
 function TodayTab({
   summary,
   openPlan,
@@ -246,15 +261,20 @@ function TodayTab({
   install: (() => void) | null;
   logout: () => void;
 }) {
+  const [sheet, setSheet] = useState<Sheet | null>(null);
   const { budget, eaten, goals, workoutCalories } = summary;
   const circumference = 2 * Math.PI * 84;
-  const near = summary.plan.filter((section) => /^(Сейчас|Сегодня|Не закрыто)/.test(section.title));
+  const today = summary.plan.filter((section) => TODAY_SECTIONS.test(section.title));
+  const upcoming = summary.plan
+    .filter((section) => UPCOMING_SECTIONS.test(section.title))
+    .flatMap((section) => section.rows)
+    .slice(0, 6);
   const macros = [
     ["Белки", eaten.proteinG, goals.proteinG, "var(--protein)"],
     ["Жиры", eaten.fatG, goals.fatG, "var(--fat)"],
     ["Углеводы", eaten.carbsG, goals.carbsG, "var(--carbs)"],
   ] as const;
-  const app = typeof window === "undefined" ? undefined : window.Telegram?.WebApp;
+  const close = () => setSheet(null);
   return (
     <>
       <div className={styles.header}>
@@ -262,15 +282,25 @@ function TodayTab({
           <span className={styles.caption}>{summary.dateLabel}</span>
           <h1 className={styles.title}>Сегодня</h1>
         </div>
-        {mode === "telegram" && app?.addToHomeScreen ? (
-          <button
-            type="button"
-            className={styles.secondary}
-            onClick={() => app.addToHomeScreen?.()}
+        <button
+          type="button"
+          className={styles.iconButton}
+          aria-label="Настройки"
+          onClick={() => setSheet("settings")}
+        >
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            aria-hidden="true"
           >
-            На экран «Домой»
-          </button>
-        ) : null}
+            <circle cx="12" cy="12" r="3" />
+            <path d={GEAR_PATH} />
+          </svg>
+        </button>
       </div>
       <div className={styles.ringCard}>
         <div className={styles.ring}>
@@ -344,54 +374,430 @@ function TodayTab({
           </div>
         ))}
       </div>
+      <div className={styles.quickActions}>
+        {(
+          [
+            ["schedule", "В расписание", "M8 3v4M16 3v4M4 9h16M5 5h14v15H5zM12 12v6M9 15h6"],
+            ["food", "Еда", "M7 3v8M5 3v5a2 2 0 0 0 4 0V3M7 11v10M17 3c-2 2-2 6 0 8v10"],
+            ["workout", "Тренировка", "M3 12h4l3-7 4 14 3-7h4"],
+          ] as Array<[Sheet, string, string]>
+        ).map(([id, label, icon]) => (
+          <button
+            key={id}
+            type="button"
+            className={styles.quickAction}
+            onClick={() => setSheet(id)}
+          >
+            <svg
+              width="22"
+              height="22"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              aria-hidden="true"
+            >
+              <path d={icon} />
+            </svg>
+            <span>+ {label}</span>
+          </button>
+        ))}
+      </div>
       <div className={styles.header}>
-        <h2 className={styles.sectionTitle}>Ближайшие часы</h2>
+        <h2 className={styles.sectionTitle}>На сегодня</h2>
         <button type="button" className={styles.linkButton} onClick={openPlan}>
           Всё расписание
         </button>
       </div>
-      {near.length ? (
-        near.map((section) => (
+      {today.length ? (
+        today.map((section) => (
           <PlanSectionCard key={section.title} section={section} call={call} busy={busy} />
         ))
       ) : (
         <div className={styles.card}>
-          <span className={styles.caption}>На сегодня в плане ничего нет.</span>
+          <span className={styles.caption}>На сегодня дел нет.</span>
         </div>
       )}
-      {mode === "browser" ? <DeviceCard install={install} logout={logout} /> : null}
+      {upcoming.length ? (
+        <PlanSectionCard
+          section={{ title: "Ближайшее", rows: upcoming, note: null }}
+          call={call}
+          busy={busy}
+        />
+      ) : null}
+      {sheet ? (
+        <SheetPanel title={SHEET_TITLES[sheet]} close={close}>
+          {sheet === "schedule" ? (
+            <ScheduleCreateForm call={call} busy={busy} done={close} />
+          ) : null}
+          {sheet === "food" ? <FoodAddCard call={call} busy={busy} onDone={close} /> : null}
+          {sheet === "workout" ? <WorkoutForm call={call} busy={busy} done={close} /> : null}
+          {sheet === "settings" ? (
+            <SettingsPanel mode={mode} install={install} logout={logout} />
+          ) : null}
+        </SheetPanel>
+      ) : null}
     </>
   );
 }
 
-// Browser mode only: how to put the app on the home screen, and a way out.
-function DeviceCard({ install, logout }: { install: (() => void) | null; logout: () => void }) {
+const GEAR_PATH =
+  "M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z";
+
+// A bottom sheet; tapping the dimmed area or ✕ closes it.
+function SheetPanel({
+  title,
+  close,
+  children,
+}: {
+  title: string;
+  close: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className={styles.sheetLayer}>
+      <button type="button" className={styles.sheetBackdrop} aria-label="Закрыть" onClick={close} />
+      <section className={styles.sheet} role="dialog" aria-modal="true" aria-label={title}>
+        <div className={styles.header}>
+          <h2 className={styles.sectionTitle}>{title}</h2>
+          <button type="button" className={styles.iconButton} aria-label="Закрыть" onClick={close}>
+            ✕
+          </button>
+        </div>
+        {children}
+      </section>
+    </div>
+  );
+}
+
+// Install the app, put the Telegram icon on the home screen, or sign this device out.
+function SettingsPanel({
+  mode,
+  install,
+  logout,
+}: {
+  mode: Mode | null;
+  install: (() => void) | null;
+  logout: () => void;
+}) {
+  const app = window.Telegram?.WebApp;
   const standalone =
     window.matchMedia?.("(display-mode: standalone)").matches ||
     (navigator as Navigator & { standalone?: boolean }).standalone === true;
   const ios = /iPhone|iPad/.test(navigator.userAgent);
   return (
-    <section className={styles.card} aria-label="Это устройство">
-      {!standalone ? (
-        <>
-          <h2 className={styles.sectionTitle}>Установить как приложение</h2>
-          {install ? (
-            <button type="button" className={styles.primary} onClick={install}>
-              Установить JARVIS
-            </button>
-          ) : (
-            <span className={styles.caption}>
-              {ios
-                ? "В Safari: кнопка «Поделиться» → «На экран „Домой“». Иконка JARVIS откроет приложение без Telegram."
-                : "В меню браузера: «Установить приложение» или «Добавить на главный экран»."}
-            </span>
-          )}
-        </>
+    <>
+      {mode === "telegram" && app?.addToHomeScreen ? (
+        <button type="button" className={styles.secondary} onClick={() => app.addToHomeScreen?.()}>
+          Иконка JARVIS на экран «Домой»
+        </button>
       ) : null}
-      <button type="button" className={styles.linkButton} onClick={logout}>
-        Выйти на этом устройстве
+      {mode === "browser" && !standalone ? (
+        install ? (
+          <button type="button" className={styles.primary} onClick={install}>
+            Установить JARVIS
+          </button>
+        ) : (
+          <span className={styles.caption}>
+            {ios
+              ? "Установить: в Safari кнопка «Поделиться» → «На экран „Домой“»."
+              : "Установить: в меню браузера «Установить приложение» или «Добавить на главный экран»."}
+          </span>
+        )
+      ) : null}
+      <span className={styles.caption}>
+        Цели по калориям и БЖУ — на вкладке «Питание», кнопка «Цели».
+      </span>
+      {mode === "browser" ? (
+        <button type="button" className={styles.secondary} onClick={logout}>
+          Выйти на этом устройстве
+        </button>
+      ) : null}
+    </>
+  );
+}
+
+const TASK_REMINDERS = [
+  ["at_time", "В это время"],
+  ["1h", "За час"],
+  ["1d", "За день"],
+] as const;
+const EVENT_REMINDERS = [
+  ["at_time", "В начале"],
+  ["15m", "За 15 мин"],
+  ["1h", "За час"],
+  ["2h", "За 2 часа"],
+  ["1d", "За день"],
+] as const;
+const DURATIONS = [
+  [30, "30 мин"],
+  [60, "1 час"],
+  [90, "1,5 часа"],
+  [120, "2 часа"],
+] as const;
+
+// "Добавить в расписание" without Telegram: a task (with an optional deadline), a meeting
+// or a planned training, with quick reminders and an optional one in the bot's words.
+function ScheduleCreateForm({ call, busy, done }: { call: Call; busy: boolean; done: () => void }) {
+  const [kind, setKind] = useState<"task" | "event" | "training">("task");
+  const [title, setTitle] = useState("");
+  const [date, setDate] = useState(localNow().slice(0, 10));
+  const [time, setTime] = useState("");
+  const [duration, setDuration] = useState(60);
+  const [reminders, setReminders] = useState<string[]>(["at_time"]);
+  const [extra, setExtra] = useState("");
+  const isEvent = kind !== "task";
+  const options = isEvent ? EVENT_REMINDERS : TASK_REMINDERS;
+  const canRemind = Boolean(date && time);
+  const missingTime = isEvent && !canRemind;
+
+  function switchKind(next: typeof kind) {
+    setKind(next);
+    setReminders(next === "task" ? ["at_time"] : ["1h"]);
+  }
+
+  function toggle(value: string) {
+    setReminders((current) =>
+      current.includes(value) ? current.filter((entry) => entry !== value) : [...current, value],
+    );
+  }
+
+  async function save() {
+    const saved = await call("/api/miniapp/item", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "create",
+        kind,
+        title: title.trim(),
+        dateLocal: date || null,
+        timeLocal: time || null,
+        durationMinutes: duration,
+        reminders: canRemind ? reminders : [],
+        remindersText: extra.trim() || null,
+      }),
+    });
+    if (saved) done();
+  }
+
+  return (
+    <>
+      <div className={styles.chips}>
+        {(
+          [
+            ["task", "Задача"],
+            ["event", "Встреча"],
+            ["training", "Тренировка"],
+          ] as const
+        ).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            className={kind === value ? styles.chipActive : styles.chip}
+            onClick={() => switchKind(value)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <label className={styles.caption} htmlFor="create-title">
+        Что
+      </label>
+      <input
+        id="create-title"
+        className={styles.input}
+        value={title}
+        placeholder={isEvent ? "например: стоматолог с Робом" : "например: оплатить кружок"}
+        onChange={(event) => setTitle(event.target.value)}
+      />
+      <span className={styles.caption}>{isEvent ? "Когда" : "Срок (можно без него)"}</span>
+      <div className={styles.dateRow}>
+        <input
+          className={styles.input}
+          type="date"
+          aria-label="Дата"
+          value={date}
+          onChange={(event) => setDate(event.target.value)}
+        />
+        <input
+          className={styles.input}
+          type="time"
+          aria-label="Время"
+          value={time}
+          onChange={(event) => setTime(event.target.value)}
+        />
+      </div>
+      {!isEvent && date ? (
+        <button
+          type="button"
+          className={styles.linkButton}
+          onClick={() => {
+            setDate("");
+            setTime("");
+          }}
+        >
+          Без срока
+        </button>
+      ) : null}
+      {isEvent ? (
+        <div className={styles.chips}>
+          {DURATIONS.map(([minutes, label]) => (
+            <button
+              key={minutes}
+              type="button"
+              className={duration === minutes ? styles.chipActive : styles.chip}
+              onClick={() => setDuration(minutes)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      <span className={styles.caption}>Напомнить</span>
+      {canRemind ? (
+        <div className={styles.chips}>
+          {options.map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              className={reminders.includes(value) ? styles.chipActive : styles.chip}
+              onClick={() => toggle(value)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <span className={styles.detail}>Укажи дату и время — тогда можно выбрать напоминание.</span>
+      )}
+      <input
+        className={styles.input}
+        aria-label="Своё напоминание"
+        value={extra}
+        placeholder="или своё: «каждый час с 8 до 12»"
+        onChange={(event) => setExtra(event.target.value)}
+      />
+      <button
+        type="button"
+        className={styles.primary}
+        disabled={busy || !title.trim() || missingTime}
+        onClick={() => void save()}
+      >
+        {busy ? "Добавляю…" : "Добавить"}
       </button>
-    </section>
+    </>
+  );
+}
+
+const WORKOUT_SPORTS = [
+  ["WeightTraining", "Силовая"],
+  ["Run", "Бег"],
+  ["Ride", "Велосипед"],
+  ["VirtualRide", "Велотренажёр"],
+  ["Walk", "Ходьба"],
+  ["Swim", "Плавание"],
+  ["Yoga", "Йога"],
+  ["Workout", "Другое"],
+] as const;
+const DISTANCE_SPORTS = new Set(["Run", "Ride", "Walk", "Swim"]);
+
+// "Добавить тренировку": for sessions the watch did not record.
+function WorkoutForm({ call, busy, done }: { call: Call; busy: boolean; done: () => void }) {
+  const [sport, setSport] = useState<string>("WeightTraining");
+  const [when, setWhen] = useState(localNow());
+  const [duration, setDuration] = useState("45");
+  const [calories, setCalories] = useState("");
+  const [distance, setDistance] = useState("");
+  const number = (value: string) => Number(value.replace(",", "."));
+  const durationValue = number(duration);
+
+  async function save() {
+    const saved = await call("/api/miniapp/workout", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sportType: sport,
+        startLocal: when,
+        durationMinutes: durationValue,
+        calories: calories.trim() ? number(calories) : null,
+        distanceKm: DISTANCE_SPORTS.has(sport) && distance.trim() ? number(distance) : null,
+      }),
+    });
+    if (saved) done();
+  }
+
+  return (
+    <>
+      <div className={styles.chips}>
+        {WORKOUT_SPORTS.map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            className={sport === value ? styles.chipActive : styles.chip}
+            onClick={() => setSport(value)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <label className={styles.caption} htmlFor="workout-when">
+        Когда
+      </label>
+      <input
+        id="workout-when"
+        className={styles.input}
+        type="datetime-local"
+        value={when}
+        max={localNow()}
+        onChange={(event) => setWhen(event.target.value)}
+      />
+      <div className={styles.dateRow}>
+        <label className={styles.caption} htmlFor="workout-duration">
+          Минут
+          <input
+            id="workout-duration"
+            className={styles.input}
+            inputMode="numeric"
+            value={duration}
+            onChange={(event) => setDuration(event.target.value)}
+          />
+        </label>
+        <label className={styles.caption} htmlFor="workout-calories">
+          Калории
+          <input
+            id="workout-calories"
+            className={styles.input}
+            inputMode="numeric"
+            value={calories}
+            placeholder="посчитаю сам"
+            onChange={(event) => setCalories(event.target.value)}
+          />
+        </label>
+      </div>
+      {DISTANCE_SPORTS.has(sport) ? (
+        <label className={styles.caption} htmlFor="workout-distance">
+          Дистанция, км (необязательно)
+          <input
+            id="workout-distance"
+            className={styles.input}
+            inputMode="decimal"
+            value={distance}
+            onChange={(event) => setDistance(event.target.value)}
+          />
+        </label>
+      ) : null}
+      <span className={styles.detail}>
+        Для тренировок без часов. Записанные часами придут сами из Garmin.
+      </span>
+      <button
+        type="button"
+        className={styles.primary}
+        disabled={busy || !(durationValue >= 1)}
+        onClick={() => void save()}
+      >
+        {busy ? "Записываю…" : "Записать"}
+      </button>
+    </>
   );
 }
 
@@ -767,45 +1173,10 @@ function PlanTab({ summary, call, busy }: { summary: MiniAppSummary; call: Call;
 type Call = (path: string, init?: RequestInit) => Promise<boolean>;
 
 function FoodTab({ summary, busy, call }: { summary: MiniAppSummary; busy: boolean; call: Call }) {
-  const fileInput = useRef<HTMLInputElement>(null);
-  const [caption, setCaption] = useState("");
-  const [pending, setPending] = useState<{ blob: Blob; url: string } | null>(null);
   const [goalsOpen, setGoalsOpen] = useState(false);
-  const [described, setDescribed] = useState<{ text: string; when: string } | null>(null);
   const [zoomed, setZoomed] = useState<string | null>(null);
   const { food, goals } = summary;
   const maxValue = Math.max(goals.calories * 1.25, ...food.week.map((day) => day.calories), 1);
-
-  // Photo first, then "what is it and roughly how much", then the estimate.
-  async function choose(file: File) {
-    const blob = await compressImage(file);
-    setPending({ blob, url: URL.createObjectURL(blob) });
-  }
-
-  function discard() {
-    if (pending) URL.revokeObjectURL(pending.url);
-    setPending(null);
-    setCaption("");
-  }
-
-  async function analyze() {
-    if (!pending) return;
-    const form = new FormData();
-    form.append("photo", pending.blob, "food.jpg");
-    if (caption.trim()) form.append("caption", caption.trim());
-    if (await call("/api/miniapp/food", { method: "POST", body: form })) discard();
-  }
-
-  // No photo: describe the meal in words and say when it was eaten.
-  async function logDescribed() {
-    if (!described?.text.trim()) return;
-    const logged = await call("/api/miniapp/food", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: described.text.trim(), eatenAtLocal: described.when }),
-    });
-    if (logged) setDescribed(null);
-  }
 
   return (
     <>
@@ -829,118 +1200,7 @@ function FoodTab({ summary, busy, call }: { summary: MiniAppSummary; busy: boole
         <GoalsCard summary={summary} busy={busy} call={call} close={() => setGoalsOpen(false)} />
       ) : null}
 
-      <div className={styles.card}>
-        {pending ? (
-          <>
-            {/* eslint-disable-next-line @next/next/no-img-element -- local blob preview */}
-            <img
-              src={pending.url}
-              alt="Фото еды"
-              style={{ width: "100%", maxHeight: 260, objectFit: "cover", borderRadius: 14 }}
-            />
-            <label className={styles.caption} htmlFor="food-caption">
-              Что это и сколько примерно
-            </label>
-            <textarea
-              id="food-caption"
-              className={styles.input}
-              style={{ minHeight: 72, paddingTop: 10 }}
-              value={caption}
-              placeholder="например: шаурма с курицей без соуса, лаваша мало, ~300 г"
-              onChange={(event) => setCaption(event.target.value)}
-            />
-            <div className={styles.chips}>
-              <button
-                type="button"
-                className={styles.primary}
-                style={{ flex: 1 }}
-                disabled={busy}
-                onClick={() => void analyze()}
-              >
-                {busy ? "Анализирую…" : "Анализировать"}
-              </button>
-              <button type="button" className={styles.secondary} disabled={busy} onClick={discard}>
-                Отмена
-              </button>
-            </div>
-          </>
-        ) : null}
-        <input
-          ref={fileInput}
-          className={styles.hidden}
-          type="file"
-          accept="image/*"
-          capture="environment"
-          aria-label="Фото еды"
-          onChange={(event) => {
-            const file = event.target.files?.[0];
-            event.target.value = "";
-            if (file) void choose(file);
-          }}
-        />
-        <button
-          type="button"
-          className={styles.primary}
-          disabled={busy}
-          onClick={() => fileInput.current?.click()}
-        >
-          {pending ? "Переснять" : "Сфотографировать еду"}
-        </button>
-        {described ? (
-          <>
-            <label className={styles.caption} htmlFor="food-text">
-              Что съел и сколько
-            </label>
-            <textarea
-              id="food-text"
-              className={styles.input}
-              style={{ minHeight: 72, paddingTop: 10 }}
-              value={described.text}
-              placeholder="например: овсянка на молоке ~250 г и банан"
-              onChange={(event) => setDescribed({ ...described, text: event.target.value })}
-            />
-            <label className={styles.caption} htmlFor="food-when">
-              Когда
-            </label>
-            <input
-              id="food-when"
-              className={styles.input}
-              type="datetime-local"
-              value={described.when}
-              max={localNow()}
-              onChange={(event) => setDescribed({ ...described, when: event.target.value })}
-            />
-            <div className={styles.chips}>
-              <button
-                type="button"
-                className={styles.primary}
-                style={{ flex: 1 }}
-                disabled={busy || !described.text.trim()}
-                onClick={() => void logDescribed()}
-              >
-                {busy ? "Считаю…" : "Посчитать"}
-              </button>
-              <button
-                type="button"
-                className={styles.secondary}
-                disabled={busy}
-                onClick={() => setDescribed(null)}
-              >
-                Отмена
-              </button>
-            </div>
-          </>
-        ) : (
-          <button
-            type="button"
-            className={styles.secondary}
-            disabled={busy}
-            onClick={() => setDescribed({ text: "", when: localNow() })}
-          >
-            Записать без фото
-          </button>
-        )}
-      </div>
+      <FoodAddCard busy={busy} call={call} />
 
       {food.today.map((entry) => (
         <FoodCard
@@ -1040,6 +1300,166 @@ function FoodTab({ summary, busy, call }: { summary: MiniAppSummary; busy: boole
         </button>
       ) : null}
     </>
+  );
+}
+
+// Photo or words. Lives on the Питание tab and in the home screen's "Еда" sheet.
+function FoodAddCard({ busy, call, onDone }: { busy: boolean; call: Call; onDone?: () => void }) {
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [caption, setCaption] = useState("");
+  const [pending, setPending] = useState<{ blob: Blob; url: string } | null>(null);
+  const [described, setDescribed] = useState<{ text: string; when: string } | null>(null);
+
+  // Photo first, then "what is it and roughly how much", then the estimate.
+  async function choose(file: File) {
+    const blob = await compressImage(file);
+    setPending({ blob, url: URL.createObjectURL(blob) });
+  }
+
+  function discard() {
+    if (pending) URL.revokeObjectURL(pending.url);
+    setPending(null);
+    setCaption("");
+  }
+
+  async function analyze() {
+    if (!pending) return;
+    const form = new FormData();
+    form.append("photo", pending.blob, "food.jpg");
+    if (caption.trim()) form.append("caption", caption.trim());
+    if (await call("/api/miniapp/food", { method: "POST", body: form })) {
+      discard();
+      onDone?.();
+    }
+  }
+
+  // No photo: describe the meal in words and say when it was eaten.
+  async function logDescribed() {
+    if (!described?.text.trim()) return;
+    const logged = await call("/api/miniapp/food", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: described.text.trim(), eatenAtLocal: described.when }),
+    });
+    if (logged) {
+      setDescribed(null);
+      onDone?.();
+    }
+  }
+
+  return (
+    <div className={styles.card}>
+      {pending ? (
+        <>
+          {/* eslint-disable-next-line @next/next/no-img-element -- local blob preview */}
+          <img
+            src={pending.url}
+            alt="Фото еды"
+            style={{ width: "100%", maxHeight: 260, objectFit: "cover", borderRadius: 14 }}
+          />
+          <label className={styles.caption} htmlFor="food-caption">
+            Что это и сколько примерно
+          </label>
+          <textarea
+            id="food-caption"
+            className={styles.input}
+            style={{ minHeight: 72, paddingTop: 10 }}
+            value={caption}
+            placeholder="например: шаурма с курицей без соуса, лаваша мало, ~300 г"
+            onChange={(event) => setCaption(event.target.value)}
+          />
+          <div className={styles.chips}>
+            <button
+              type="button"
+              className={styles.primary}
+              style={{ flex: 1 }}
+              disabled={busy}
+              onClick={() => void analyze()}
+            >
+              {busy ? "Анализирую…" : "Анализировать"}
+            </button>
+            <button type="button" className={styles.secondary} disabled={busy} onClick={discard}>
+              Отмена
+            </button>
+          </div>
+        </>
+      ) : null}
+      <input
+        ref={fileInput}
+        className={styles.hidden}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        aria-label="Фото еды"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          event.target.value = "";
+          if (file) void choose(file);
+        }}
+      />
+      <button
+        type="button"
+        className={styles.primary}
+        disabled={busy}
+        onClick={() => fileInput.current?.click()}
+      >
+        {pending ? "Переснять" : "Сфотографировать еду"}
+      </button>
+      {described ? (
+        <>
+          <label className={styles.caption} htmlFor="food-text">
+            Что съел и сколько
+          </label>
+          <textarea
+            id="food-text"
+            className={styles.input}
+            style={{ minHeight: 72, paddingTop: 10 }}
+            value={described.text}
+            placeholder="например: овсянка на молоке ~250 г и банан"
+            onChange={(event) => setDescribed({ ...described, text: event.target.value })}
+          />
+          <label className={styles.caption} htmlFor="food-when">
+            Когда
+          </label>
+          <input
+            id="food-when"
+            className={styles.input}
+            type="datetime-local"
+            value={described.when}
+            max={localNow()}
+            onChange={(event) => setDescribed({ ...described, when: event.target.value })}
+          />
+          <div className={styles.chips}>
+            <button
+              type="button"
+              className={styles.primary}
+              style={{ flex: 1 }}
+              disabled={busy || !described.text.trim()}
+              onClick={() => void logDescribed()}
+            >
+              {busy ? "Считаю…" : "Посчитать"}
+            </button>
+            <button
+              type="button"
+              className={styles.secondary}
+              disabled={busy}
+              onClick={() => setDescribed(null)}
+            >
+              Отмена
+            </button>
+          </div>
+        </>
+      ) : (
+        <button
+          type="button"
+          className={styles.secondary}
+          disabled={busy}
+          onClick={() => setDescribed({ text: "", when: localNow() })}
+        >
+          Записать без фото
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -1447,7 +1867,16 @@ function GoalsCard({
   );
 }
 
-function FitnessTab({ summary }: { summary: MiniAppSummary }) {
+function FitnessTab({
+  summary,
+  call,
+  busy,
+}: {
+  summary: MiniAppSummary;
+  call: Call;
+  busy: boolean;
+}) {
+  const [adding, setAdding] = useState(false);
   const { fitness } = summary;
   const wellness = fitness.latestWellness;
   const hours = Math.floor(fitness.movingTimeS / 3600);
@@ -1458,6 +1887,15 @@ function FitnessTab({ summary }: { summary: MiniAppSummary }) {
         <span className={styles.caption}>Garmin → Intervals.icu · эта неделя</span>
         <h1 className={styles.title}>Тренировки</h1>
       </div>
+      {adding ? (
+        <section className={styles.card} aria-label="Добавить тренировку">
+          <WorkoutForm call={call} busy={busy} done={() => setAdding(false)} />
+        </section>
+      ) : (
+        <button type="button" className={styles.secondary} onClick={() => setAdding(true)}>
+          + Добавить тренировку вручную
+        </button>
+      )}
       <div className={styles.stats3}>
         <div className={styles.stat}>
           <span className={styles.statValue}>{fitness.count}</span>
@@ -1509,6 +1947,21 @@ function FitnessTab({ summary }: { summary: MiniAppSummary }) {
                 </span>
                 <span className={styles.detail}>{activity.metrics}</span>
                 {activity.extra ? <span className={styles.detail}>{activity.extra}</span> : null}
+                {activity.manual ? (
+                  <button
+                    type="button"
+                    className={styles.linkButton}
+                    style={{ alignSelf: "flex-start" }}
+                    disabled={busy}
+                    onClick={async () => {
+                      if (await confirmAction("Удалить эту тренировку?")) {
+                        await call(`/api/miniapp/workout?id=${activity.id}`, { method: "DELETE" });
+                      }
+                    }}
+                  >
+                    Удалить (добавлена вручную)
+                  </button>
+                ) : null}
               </div>
             ))}
           </div>
