@@ -17,6 +17,8 @@ const display = Unbounded({
 export const metadata: Metadata = {
   title: "JARVIS",
   description: "Калории, расписание и тренировки",
+  applicationName: "JARVIS",
+  appleWebApp: { capable: true, title: "JARVIS", statusBarStyle: "black" },
 };
 
 export const viewport: Viewport = {

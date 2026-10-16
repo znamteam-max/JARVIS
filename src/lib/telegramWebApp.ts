@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 import { getUserByTelegramId } from "@/db/queries/users";
 import { getAllowedTelegramUserIds, requireEnv } from "@/lib/env";
+import { resolveWebSessionOwner } from "@/services/webLogin";
 
 const MAX_INIT_DATA_AGE_S = 24 * 60 * 60;
 
@@ -39,8 +40,11 @@ export function verifyTelegramInitData(params: {
   }
 }
 
+// Inside Telegram the signed launch data proves the owner; in a browser or the installed
+// home-screen app, a device session the owner approved in the bot does.
 export async function resolveMiniAppOwner(request: Request) {
   const initData = request.headers.get("x-telegram-init-data") ?? "";
+  if (!initData) return resolveWebSessionOwner(request);
   const verified = verifyTelegramInitData({ initData, botToken: requireEnv("TELEGRAM_BOT_TOKEN") });
   if (!verified || !getAllowedTelegramUserIds().has(verified.telegramUserId)) return null;
   return getUserByTelegramId(verified.telegramUserId);

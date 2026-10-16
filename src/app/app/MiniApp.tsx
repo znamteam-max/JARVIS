@@ -1,13 +1,15 @@
 "use client";
 
 import Script from "next/script";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { MiniAppSummary } from "@/services/miniappSummary";
 
 import styles from "./miniapp.module.css";
 
 type Tab = "today" | "plan" | "food" | "fitness";
+type Mode = "telegram" | "browser";
+type InstallPrompt = Event & { prompt(): Promise<void> };
 type TelegramWebApp = {
   initData: string;
   ready(): void;
@@ -35,13 +37,26 @@ const ERRORS: Record<string, string> = {
 };
 
 export function MiniApp() {
-  const [initData, setInitData] = useState<string | null>(null);
+  const [mode, setMode] = useState<Mode | null>(null);
+  const [needsLogin, setNeedsLogin] = useState(false);
   const [summary, setSummary] = useState<MiniAppSummary | null>(null);
   const [tab, setTab] = useState<Tab>("today");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [installPrompt, setInstallPrompt] = useState<InstallPrompt | null>(null);
 
   const initDataRef = useRef("");
+  const startedRef = useRef(false);
+
+  // Chrome/Android offers its own install dialog; keep the event for the "Установить" button.
+  useEffect(() => {
+    const keep = (event: Event) => {
+      event.preventDefault();
+      setInstallPrompt(event as InstallPrompt);
+    };
+    window.addEventListener("beforeinstallprompt", keep);
+    return () => window.removeEventListener("beforeinstallprompt", keep);
+  }, []);
 
   const call = useCallback(async (path: string, init?: RequestInit) => {
     setBusy(true);
@@ -51,6 +66,12 @@ export function MiniApp() {
         ...init,
         headers: { ...(init?.headers ?? {}), "x-telegram-init-data": initDataRef.current },
       });
+      // Outside Telegram a 401 just means this device has not been approved yet.
+      if (response.status === 401 && !initDataRef.current) {
+        setSummary(null);
+        setNeedsLogin(true);
+        return false;
+      }
       const body = (await response.json().catch(() => ({}))) as {
         ok?: boolean;
         error?: string;
@@ -69,34 +90,73 @@ export function MiniApp() {
     }
   }, []);
 
-  // Runs once the Telegram script is ready (also on remount); no effect-driven state.
-  const connectTelegram = useCallback(() => {
+  // Runs once the Telegram script is ready (or failed to load). Inside Telegram the launch
+  // data signs every request; in a browser the approved device cookie does.
+  const connect = useCallback(() => {
+    if (startedRef.current) return;
+    startedRef.current = true;
     const app = window.Telegram?.WebApp;
-    if (!app || initDataRef.current) return;
-    app.ready();
-    app.expand();
-    app.setHeaderColor?.("#0F1218");
-    app.setBackgroundColor?.("#0F1218");
-    initDataRef.current = app.initData ?? "";
-    setInitData(initDataRef.current);
-    if (initDataRef.current) void call("/api/miniapp/summary");
+    if (app?.initData) {
+      app.ready();
+      app.expand();
+      app.setHeaderColor?.("#0F1218");
+      app.setBackgroundColor?.("#0F1218");
+      initDataRef.current = app.initData;
+    }
+    setMode(app?.initData ? "telegram" : "browser");
+    void call("/api/miniapp/summary");
   }, [call]);
+
+  const logout = useCallback(async () => {
+    if (!(await confirmAction("Выйти на этом устройстве? Войти снова можно через Telegram."))) {
+      return;
+    }
+    await fetch("/api/auth/web-login", { method: "DELETE" }).catch(() => undefined);
+    setSummary(null);
+    setNeedsLogin(true);
+  }, []);
 
   return (
     <div className={styles.app}>
-      <Script src="https://telegram.org/js/telegram-web-app.js" onReady={connectTelegram} />
+      <Script
+        src="https://telegram.org/js/telegram-web-app.js"
+        onReady={connect}
+        onError={connect}
+      />
       <div className={styles.content}>
-        {initData === "" ? <div className={styles.notice}>{ERRORS.unauthorized}</div> : null}
+        {needsLogin ? (
+          <LoginScreen
+            onDone={() => {
+              setNeedsLogin(false);
+              void call("/api/miniapp/summary");
+            }}
+          />
+        ) : null}
         {error ? <div className={styles.error}>{error}</div> : null}
-        {!summary && initData !== "" ? <div className={styles.caption}>Загружаю…</div> : null}
+        {!summary && !needsLogin && !error ? <div className={styles.caption}>Загружаю…</div> : null}
         {summary && tab === "today" ? (
-          <TodayTab summary={summary} openPlan={() => setTab("plan")} call={call} busy={busy} />
+          <TodayTab
+            summary={summary}
+            openPlan={() => setTab("plan")}
+            call={call}
+            busy={busy}
+            mode={mode}
+            install={
+              installPrompt
+                ? () => {
+                    void installPrompt.prompt();
+                    setInstallPrompt(null);
+                  }
+                : null
+            }
+            logout={() => void logout()}
+          />
         ) : null}
         {summary && tab === "plan" ? <PlanTab summary={summary} call={call} busy={busy} /> : null}
         {summary && tab === "food" ? <FoodTab summary={summary} busy={busy} call={call} /> : null}
         {summary && tab === "fitness" ? <FitnessTab summary={summary} /> : null}
       </div>
-      <nav className={styles.tabbar} aria-label="Разделы">
+      <nav className={needsLogin ? styles.hidden : styles.tabbar} aria-label="Разделы">
         {(
           [
             ["today", "Сегодня", "M12 4a8 8 0 1 0 0 16a8 8 0 1 0 0-16M12 8v4l3 2"],
@@ -140,11 +200,17 @@ function TodayTab({
   openPlan,
   call,
   busy,
+  mode,
+  install,
+  logout,
 }: {
   summary: MiniAppSummary;
   openPlan: () => void;
   call: Call;
   busy: boolean;
+  mode: Mode | null;
+  install: (() => void) | null;
+  logout: () => void;
 }) {
   const { budget, eaten, goals, workoutCalories } = summary;
   const circumference = 2 * Math.PI * 84;
@@ -162,7 +228,7 @@ function TodayTab({
           <span className={styles.caption}>{summary.dateLabel}</span>
           <h1 className={styles.title}>Сегодня</h1>
         </div>
-        {app?.addToHomeScreen ? (
+        {mode === "telegram" && app?.addToHomeScreen ? (
           <button
             type="button"
             className={styles.secondary}
@@ -259,9 +325,165 @@ function TodayTab({
           <span className={styles.caption}>На сегодня в плане ничего нет.</span>
         </div>
       )}
+      {mode === "browser" ? <DeviceCard install={install} logout={logout} /> : null}
     </>
   );
 }
+
+// Browser mode only: how to put the app on the home screen, and a way out.
+function DeviceCard({ install, logout }: { install: (() => void) | null; logout: () => void }) {
+  const standalone =
+    window.matchMedia?.("(display-mode: standalone)").matches ||
+    (navigator as Navigator & { standalone?: boolean }).standalone === true;
+  const ios = /iPhone|iPad/.test(navigator.userAgent);
+  return (
+    <section className={styles.card} aria-label="Это устройство">
+      {!standalone ? (
+        <>
+          <h2 className={styles.sectionTitle}>Установить как приложение</h2>
+          {install ? (
+            <button type="button" className={styles.primary} onClick={install}>
+              Установить JARVIS
+            </button>
+          ) : (
+            <span className={styles.caption}>
+              {ios
+                ? "В Safari: кнопка «Поделиться» → «На экран „Домой“». Иконка JARVIS откроет приложение без Telegram."
+                : "В меню браузера: «Установить приложение» или «Добавить на главный экран»."}
+            </span>
+          )}
+        </>
+      ) : null}
+      <button type="button" className={styles.linkButton} onClick={logout}>
+        Выйти на этом устройстве
+      </button>
+    </section>
+  );
+}
+
+// Outside Telegram: the device asks, the owner taps "Разрешить" in the bot, the app opens.
+function LoginScreen({ onDone }: { onDone: () => void }) {
+  const [step, setStep] = useState<"start" | "waiting" | "denied">("start");
+  const [code, setCode] = useState<string | null>(null);
+  const [bot, setBot] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const pollingRef = useRef(false);
+
+  const poll = useCallback(async () => {
+    if (pollingRef.current) return;
+    pollingRef.current = true;
+    const deadline = Date.now() + 10 * 60 * 1000;
+    try {
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const body = (await fetch("/api/auth/web-login", { cache: "no-store" })
+          .then((response) => response.json())
+          .catch(() => null)) as { state?: string } | null;
+        if (body?.state === "active") return onDone();
+        if (body?.state === "denied") return setStep("denied");
+        if (body?.state === "none" || body?.state === "expired") break;
+      }
+      setStep("start");
+      setMessage("Запрос истёк. Нажми «Войти» ещё раз.");
+    } finally {
+      pollingRef.current = false;
+    }
+  }, [onDone]);
+
+  // A request may already be waiting (the app was reopened after switching to Telegram).
+  useEffect(() => {
+    void fetch("/api/auth/web-login", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((body: { state?: string; code?: string | null }) => {
+        if (body.state !== "pending") return;
+        setCode(body.code ?? null);
+        setStep("waiting");
+        void poll();
+      })
+      .catch(() => undefined);
+  }, [poll]);
+
+  async function start() {
+    setSending(true);
+    setMessage(null);
+    try {
+      const response = await fetch("/api/auth/web-login", { method: "POST" });
+      const body = (await response.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        code?: string;
+        botUsername?: string | null;
+      };
+      if (!response.ok || !body.ok) {
+        setMessage(
+          body.error === "too_many_requests"
+            ? "Слишком много попыток входа. Подожди 10 минут."
+            : "Не получилось отправить запрос в Telegram. Попробуй ещё раз.",
+        );
+        return;
+      }
+      setCode(body.code ?? null);
+      setBot(body.botUsername ?? null);
+      setStep("waiting");
+      void poll();
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <section className={styles.card} aria-label="Вход">
+      <h1 className={styles.title}>JARVIS</h1>
+      {step === "waiting" ? (
+        <>
+          <span className={styles.caption}>Код подтверждения</span>
+          <span className={styles.ringValue} style={{ fontSize: 40, letterSpacing: 6 }}>
+            {code}
+          </span>
+          <span>
+            Открой Telegram: бот прислал запрос на вход с этим кодом. Нажми «✅ Разрешить» — и
+            приложение откроется здесь само.
+          </span>
+          {bot ? (
+            <a className={styles.secondary} href={`https://t.me/${bot}`} style={linkButtonStyle}>
+              Открыть Telegram
+            </a>
+          ) : null}
+          <span className={styles.caption}>Жду подтверждения…</span>
+        </>
+      ) : (
+        <>
+          <span>
+            {step === "denied"
+              ? "Вход отклонён в Telegram."
+              : "Приложение работает и без Telegram. Чтобы войти на этом устройстве, один раз подтверди вход в чате с ботом."}
+          </span>
+          <button
+            type="button"
+            className={styles.primary}
+            disabled={sending}
+            onClick={() => void start()}
+          >
+            {sending
+              ? "Отправляю…"
+              : step === "denied"
+                ? "Попробовать снова"
+                : "Войти через Telegram"}
+          </button>
+        </>
+      )}
+      {message ? <span className={styles.error}>{message}</span> : null}
+    </section>
+  );
+}
+
+const linkButtonStyle = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  textDecoration: "none",
+} as const;
 
 type PlanSection = MiniAppSummary["plan"][number];
 type EditableItem = NonNullable<PlanSection["rows"][number]["item"]>;

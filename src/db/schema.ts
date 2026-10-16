@@ -852,6 +852,28 @@ export const integrationSyncState = assistantTable("integration_sync_state", {
   ...timestamps,
 });
 
+// Browser/home-screen access without Telegram: a device asks, the owner approves in the bot.
+export const webSessions = assistantTable(
+  "web_sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    code: text("code").notNull(),
+    // pending | active | denied | revoked
+    status: text("status").notNull().default("pending"),
+    device: text("device"),
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    ...timestamps,
+  },
+  (table) => [uniqueIndex("web_sessions_token_hash_uq").on(table.tokenHash)],
+);
+
+export type WebSession = typeof webSessions.$inferSelect;
 export type FitnessActivity = typeof fitnessActivities.$inferSelect;
 export type WellnessDay = typeof wellnessDays.$inferSelect;
 

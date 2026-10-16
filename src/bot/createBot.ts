@@ -32,6 +32,7 @@ import { registerCommands } from "./commands";
 import { registerFoodHandlers } from "./foodHandlers";
 import { registerFitnessHandlers } from "./fitnessHandlers";
 import { registerStravaHandlers } from "./stravaHandlers";
+import { registerWebLoginHandlers } from "./webLoginHandlers";
 import { registerMessageHandlers } from "./messageHandlers";
 import { recordUpdateOnce } from "./updateRecorder";
 import { stabilityScheduleReminderMenuKeyboard } from "./stabilityKeyboards";
@@ -300,6 +301,7 @@ export function createBot() {
     );
   });
 
+  registerWebLoginHandlers(instance);
   registerFoodHandlers(instance);
   registerStravaHandlers(instance);
   registerFitnessHandlers(instance);

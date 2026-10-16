@@ -99,6 +99,13 @@
       "when": 1792339200000,
       "tag": "0013_food_photos",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1792425600000,
+      "tag": "0014_web_sessions",
+      "breakpoints": true
     }
   ]
 }
