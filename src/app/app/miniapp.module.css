@@ -521,6 +521,16 @@
   font-size: 15px;
 }
 
+.autoNote {
+  align-self: center;
+  max-width: 100%;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: pre-wrap;
+  text-align: center;
+  padding: 4px 8px;
+}
+
 .bubbleCoach {
   align-self: stretch;
   background: var(--surface);

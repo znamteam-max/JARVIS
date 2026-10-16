@@ -125,3 +125,26 @@ export async function deleteManualFitnessActivity(params: { userId: string; id: 
     .returning({ id: fitnessActivities.id });
   return row ?? null;
 }
+
+export async function listActivitiesAwaitingCoach(userId: string, since: Date) {
+  return getDb()
+    .select()
+    .from(fitnessActivities)
+    .where(
+      and(
+        eq(fitnessActivities.userId, userId),
+        isNull(fitnessActivities.coachReviewedAt),
+        gte(fitnessActivities.startAt, since),
+      ),
+    );
+}
+
+// Only rows still unclaimed come back, so a parallel tick cannot review them again.
+export async function claimActivitiesForCoach(ids: string[], at: Date) {
+  if (!ids.length) return [];
+  return getDb()
+    .update(fitnessActivities)
+    .set({ coachReviewedAt: at, updatedAt: new Date() })
+    .where(and(inArray(fitnessActivities.id, ids), isNull(fitnessActivities.coachReviewedAt)))
+    .returning();
+}

@@ -12,6 +12,7 @@ import {
 } from "@/db/queries/coach";
 import { listFitnessActivitiesSince, listWellnessDaysSince } from "@/db/queries/fitness";
 import type { User } from "@/db/schema";
+import { activityWatts, withoutWatchDuplicates } from "@/domain/activityDedupe";
 import { formatRideForCoach, type RideSummary } from "@/domain/rideAnalysis";
 import { sportLabel } from "@/domain/stravaActivity";
 import { parseFitRide } from "@/integrations/fitFile";
@@ -30,8 +31,8 @@ const COACH_INSTRUCTIONS = `Ты — личный тренер владельц�
 
 Данные ниже:
 - «Профиль и история» — главный документ от владельца: цели (180 км быстрее 5 часов), зоны, история, договорённости. Опирайся на него.
-- «Заезды с мощностью» — разбор FIT-файлов Magene/Zwift. Это ЕДИНСТВЕННЫЙ источник ватт. IF/TSS посчитаны от FTP из настроек. Устройство Magene настроено на FTP 222, его собственные IF/TSS завышены — не используй их.
-- «Тренировки с часов Garmin» (через Intervals.icu) — только время и пульс, без мощности. Если в тот же день и время есть заезд с мощностью — это одна и та же тренировка.
+- «Заезды с мощностью» — посекундный разбор (Zwift через Intervals.icu и FIT-файлы Magene): ватты, интервалы, блоки по 10 минут, дрейф Pa:HR. IF/TSS посчитаны от FTP из настроек. Устройство Magene настроено на FTP 222, его собственные IF/TSS завышены — не используй их.
+- «Все тренировки» (Intervals.icu): поездки Zwift — с мощностью; записи часов Garmin — только время и пульс. Записи часов, которые дублируют поездку Zwift по времени, уже убраны. Если в то же время есть и строка там, и заезд с мощностью — это одна и та же тренировка.
 - Сон, HRV и пульс покоя, расписание дня и питание за сегодня.
 
 Учитывай восстановление (сон, HRV, пульс покоя), жару и охлаждение, болезнь, силовые, расписание и питание.
@@ -43,14 +44,22 @@ export type CoachMessageView = {
   role: "user" | "assistant";
   content: string;
   createdAt: string;
+  auto: boolean;
 };
 
-function view(row: { id: string; role: string; content: string; createdAt: Date }) {
+function view(row: {
+  id: string;
+  role: string;
+  content: string;
+  createdAt: Date;
+  metadata: Record<string, unknown>;
+}) {
   return {
     id: row.id,
     role: row.role === "assistant" ? "assistant" : "user",
     content: row.content,
     createdAt: row.createdAt.toISOString(),
+    auto: row.metadata?.auto === true,
   } satisfies CoachMessageView;
 }
 
@@ -58,7 +67,7 @@ export async function listCoachConversation(userId: string) {
   return (await listActiveCoachMessages(userId, 60)).map(view);
 }
 
-function coachFtp(settings: Record<string, unknown> | undefined) {
+export function coachFtp(settings: Record<string, unknown> | undefined) {
   const ftp = Number(settings?.ftp);
   return Number.isFinite(ftp) && ftp > 100 ? ftp : DEFAULT_FTP;
 }
@@ -85,17 +94,19 @@ export async function buildCoachContext(user: User, now = new Date()) {
   const rideLines = rides.map((ride) =>
     formatRideForCoach(ride.summary as unknown as RideSummary, label(ride.startedAt)),
   );
-  const activityLines = [...activities]
+  const activityLines = withoutWatchDuplicates(activities)
     .sort((a, b) => a.startAt.getTime() - b.startAt.getTime())
     .map((activity) => {
       const raw = (activity.raw ?? {}) as Record<string, unknown>;
+      const watts = activityWatts(activity);
       return [
         `${label(activity.startAt)} ${sportLabel(activity.sportType)} «${activity.name}»`,
         `${Math.round(activity.movingTimeS / 60)} мин`,
+        watts ? `avg ${watts} Вт, NP ${raw.icu_weighted_avg_watts ?? "?"}` : null,
         activity.averageHeartrate
           ? `пульс ${activity.averageHeartrate}/${activity.maxHeartrate}`
           : null,
-        typeof raw.hr_load === "number" ? `нагрузка по пульсу ${raw.hr_load}` : null,
+        typeof raw.icu_training_load === "number" ? `нагрузка ${raw.icu_training_load}` : null,
         activity.calories ? `${activity.calories} ккал` : null,
         activity.source === "manual" ? "(добавлена вручную)" : null,
       ]
@@ -132,10 +143,10 @@ export async function buildCoachContext(user: User, now = new Date()) {
     "## Профиль и история (от владельца)",
     profile?.profile ?? "Профиль ещё не заполнен.",
     "",
-    "## Заезды с мощностью (файлы Magene/Zwift), 6 недель",
+    "## Заезды с мощностью (посекундный разбор), 6 недель",
     rideLines.length ? rideLines.join("\n") : "Нет загруженных файлов с мощностью.",
     "",
-    "## Тренировки с часов Garmin (Intervals.icu), 3 недели — без мощности",
+    "## Все тренировки (Intervals.icu: Zwift с мощностью, часы Garmin — только пульс), 3 недели",
     activityLines.length ? activityLines.join("\n") : "Нет данных.",
     "",
     "## Сон и восстановление, 2 недели",
@@ -148,10 +159,13 @@ export async function buildCoachContext(user: User, now = new Date()) {
   ].join("\n");
 }
 
-async function generateReply(user: User, now: Date) {
+// Answers the latest message in the thread, stores the answer and returns its text.
+export async function generateCoachReply(user: User, now: Date, extraInstruction?: string) {
   const history = await listActiveCoachMessages(user.id, HISTORY_MESSAGES);
   const context = await buildCoachContext(user, now);
-  const instructions = `${COACH_INSTRUCTIONS}\n\n# Данные\n${context}`;
+  const instructions = [COACH_INSTRUCTIONS, extraInstruction, `# Данные\n${context}`]
+    .filter(Boolean)
+    .join("\n\n");
   const input = history.map((message) => ({
     role: message.role === "assistant" ? ("assistant" as const) : ("user" as const),
     content: message.content,
@@ -194,6 +208,7 @@ async function generateReply(user: User, now: Date) {
     content: text,
     metadata: { model: response.model ?? model },
   });
+  return text;
 }
 
 async function guardDailyLimit(user: User, now: Date) {
@@ -208,7 +223,7 @@ export async function askCoach(params: { user: User; message: string; now?: Date
   const now = params.now ?? new Date();
   await guardDailyLimit(params.user, now);
   await insertCoachMessage({ userId: params.user.id, role: "user", content: params.message });
-  await generateReply(params.user, now);
+  await generateCoachReply(params.user, now);
   return listCoachConversation(params.user.id);
 }
 
@@ -240,6 +255,6 @@ export async function uploadRideToCoach(params: {
     role: "user",
     content: `📎 Загрузил тренировку за ${when}${params.fileName ? ` (${params.fileName})` : ""}. Разбери её.`,
   });
-  await generateReply(params.user, now);
+  await generateCoachReply(params.user, now);
   return listCoachConversation(params.user.id);
 }

@@ -148,6 +148,11 @@ export function MiniApp() {
       initDataRef.current = app.initData;
     }
     setMode(app?.initData ? "telegram" : "browser");
+    // "Открыть разбор" in the coach's notification opens /app?tab=coach.
+    const wanted = new URLSearchParams(window.location.search).get("tab");
+    if (wanted && ["today", "plan", "food", "fitness", "coach"].includes(wanted)) {
+      setTab(wanted as Tab);
+    }
     void call("/api/miniapp/summary");
   }, [call]);
 
@@ -1997,6 +2002,7 @@ type CoachMessageView = {
   role: "user" | "assistant";
   content: string;
   createdAt: string;
+  auto?: boolean;
 };
 type Api = (path: string, init?: RequestInit) => Promise<Record<string, unknown> | null>;
 
@@ -2097,14 +2103,20 @@ function CoachTab({ api }: { api: Api }) {
         </div>
       ) : null}
       <div className={styles.chat}>
-        {messages?.map((message) => (
-          <div
-            key={message.id}
-            className={message.role === "user" ? styles.bubbleUser : styles.bubbleCoach}
-          >
-            {message.role === "user" ? message.content : <Markdown text={message.content} />}
-          </div>
-        ))}
+        {messages?.map((message) =>
+          message.auto ? (
+            <div key={message.id} className={styles.autoNote}>
+              {message.content}
+            </div>
+          ) : (
+            <div
+              key={message.id}
+              className={message.role === "user" ? styles.bubbleUser : styles.bubbleCoach}
+            >
+              {message.role === "user" ? message.content : <Markdown text={message.content} />}
+            </div>
+          ),
+        )}
         {sending ? (
           <div className={styles.bubbleCoach}>
             <span className={styles.caption}>Тренер думает… (до минуты)</span>

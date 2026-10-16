@@ -1,5 +1,6 @@
 import { DateTime } from "luxon";
 
+import { canUseOpenAI } from "@/ai/openaiClient";
 import { getBot } from "@/bot/createBot";
 import {
   getIntegrationSyncState,
@@ -20,7 +21,7 @@ import { logger } from "@/lib/logger";
 
 export const INTERVALS_SOURCE = "intervals";
 const SYNC_KEY = "intervals_icu";
-const SYNC_INTERVAL_MS = 30 * 60 * 1000;
+const SYNC_INTERVAL_MS = 15 * 60 * 1000;
 const INITIAL_HISTORY_DAYS = 30;
 const WELLNESS_DAYS = 7;
 
@@ -33,8 +34,13 @@ export async function syncIntervalsIfDue(now = new Date()) {
   const user = ownerTelegramId ? await getUserByTelegramId(ownerTelegramId) : null;
   if (!user) return { synced: false, reason: "owner_unknown" };
   try {
-    // The very first import is silent: a month of history is not "new" workouts.
-    const result = await syncIntervalsForUser({ user, now, announce: Boolean(state?.lastSyncAt) });
+    // The very first import is silent: a month of history is not "new" workouts. With
+    // OpenAI configured the coach announces workouts itself (coachReviews).
+    const result = await syncIntervalsForUser({
+      user,
+      now,
+      announce: Boolean(state?.lastSyncAt) && !canUseOpenAI(),
+    });
     await setIntegrationSyncState(SYNC_KEY, now, null);
     return { synced: true, ...result };
   } catch (error) {

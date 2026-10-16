@@ -3,6 +3,7 @@ import { DateTime } from "luxon";
 import { listFitnessActivitiesSince, listWellnessDaysSince } from "@/db/queries/fitness";
 import { getNutritionGoals, listFoodEntriesSince } from "@/db/queries/food";
 import type { FoodEntry, User } from "@/db/schema";
+import { withoutWatchDuplicates } from "@/domain/activityDedupe";
 import { sumFoodMacros } from "@/domain/foodEstimate";
 import { signFoodPhotoUrl } from "@/domain/foodPhoto";
 import { formatWellnessSummary } from "@/domain/intervalsFitness";
@@ -23,7 +24,7 @@ export async function buildMiniAppSummary(user: User, now = new Date()) {
   const weekStart = local.startOf("week");
   const since = DateTime.min(weekStart, local.startOf("day").minus({ days: 6 }));
 
-  const [goals, foodSince, plan, activities, wellness] = await Promise.all([
+  const [goals, foodSince, plan, allActivities, wellness] = await Promise.all([
     getNutritionGoals(user.id),
     listFoodEntriesSince({ userId: user.id, since: since.toUTC().toJSDate() }),
     renderLiveDashboard({ userId: user.id, timezone, now, readOnly: true }),
@@ -31,6 +32,8 @@ export async function buildMiniAppSummary(user: User, now = new Date()) {
     listWellnessDaysSince(user.id, local.minus({ days: 7 }).toISODate() ?? ""),
   ]);
 
+  // The watch's copy of a Zwift ride would double the calories and the training time.
+  const activities = withoutWatchDuplicates(allActivities);
   const dayOf = (date: Date) =>
     DateTime.fromJSDate(date, { zone: "utc" }).setZone(timezone).toISODate() ?? "";
   // Newest additions first, so what was just logged is always on top.

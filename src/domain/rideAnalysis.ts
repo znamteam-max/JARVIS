@@ -222,3 +222,21 @@ export function formatRideForCoach(summary: RideSummary, localLabel: string) {
       : null;
   return [head, best, intervals, blocks].filter(Boolean).join("\n");
 }
+
+// Intervals.icu streams ({type, data[]}, time in seconds from the start) → samples.
+export function samplesFromStreams(
+  startAt: Date,
+  streams: Array<{ type: string; data: Array<number | null> | null }>,
+): RideSample[] {
+  const get = (type: string) => streams.find((stream) => stream.type === type)?.data ?? [];
+  const time = get("time");
+  const watts = get("watts");
+  const heartrate = get("heartrate");
+  const cadence = get("cadence");
+  return time.map((seconds, i) => ({
+    t: new Date(startAt.getTime() + (seconds ?? i) * 1000),
+    power: watts[i] ?? null,
+    hr: heartrate[i] ?? null,
+    cadence: cadence[i] ?? null,
+  }));
+}

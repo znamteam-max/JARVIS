@@ -815,6 +815,8 @@ export const fitnessActivities = assistantTable(
     trainingLoad: integer("training_load"),
     raw: jsonb("raw").$type<Record<string, unknown>>().notNull().default(emptyJson),
     notifiedAt: timestamp("notified_at", { withTimezone: true }),
+    // Set once the coach has commented on the workout (or decided it is a duplicate).
+    coachReviewedAt: timestamp("coach_reviewed_at", { withTimezone: true }),
     ...timestamps,
   },
   (table) => [
