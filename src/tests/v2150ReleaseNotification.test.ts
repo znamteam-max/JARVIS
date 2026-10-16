@@ -209,7 +209,7 @@ describe("V2.15.0 protected endpoint auth", () => {
 
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({ ok: false, error: "unauthorized" });
-  });
+  }, 20_000); // cold-imports the whole admin repair route; 5 s is not enough on a busy machine
 });
 
 function validInput(
