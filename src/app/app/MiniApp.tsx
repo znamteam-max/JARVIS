@@ -20,7 +20,7 @@ import type { MiniAppSummary } from "@/services/miniappSummary";
 
 import styles from "./miniapp.module.css";
 
-type Tab = "today" | "plan" | "food" | "fitness";
+type Tab = "today" | "plan" | "food" | "fitness" | "coach";
 type Mode = "telegram" | "browser";
 type InstallPrompt = Event & { prompt(): Promise<void> };
 type TelegramWebApp = {
@@ -119,6 +119,21 @@ export function MiniApp() {
     }
   }, []);
 
+  // For screens that do not return the summary (the coach chat): same auth, raw JSON back.
+  const api = useCallback(async (path: string, init?: RequestInit) => {
+    const response = await fetch(path, {
+      ...init,
+      headers: { ...(init?.headers ?? {}), "x-telegram-init-data": initDataRef.current },
+    }).catch(() => null);
+    if (!response) return null;
+    if (response.status === 401 && !initDataRef.current) {
+      setSummary(null);
+      setNeedsLogin(true);
+      return null;
+    }
+    return (await response.json().catch(() => null)) as Record<string, unknown> | null;
+  }, []);
+
   // Runs once the Telegram script is ready (or failed to load). Inside Telegram the launch
   // data signs every request; in a browser the approved device cookie does.
   const connect = useCallback(() => {
@@ -188,6 +203,7 @@ export function MiniApp() {
         ) : null}
         {summary && tab === "plan" ? <PlanTab summary={summary} call={call} busy={busy} /> : null}
         {summary && tab === "food" ? <FoodTab summary={summary} busy={busy} call={call} /> : null}
+        {summary && tab === "coach" ? <CoachTab api={api} /> : null}
         {summary && tab === "fitness" ? (
           <FitnessTab summary={summary} call={call} busy={busy} />
         ) : null}
@@ -199,6 +215,7 @@ export function MiniApp() {
             ["plan", "Расписание", "M4 6h16M4 12h16M4 18h10"],
             ["food", "Питание", "M7 3v8M5 3v5a2 2 0 0 0 4 0V3M7 11v10M17 3c-2 2-2 6 0 8v10"],
             ["fitness", "Тренировки", "M3 12h4l3-7 4 14 3-7h4"],
+            ["coach", "Тренер", "M4 5h16v11H9l-5 4z"],
           ] as Array<[Tab, string, string]>
         ).map(([id, label, icon]) => (
           <button
@@ -1972,6 +1989,345 @@ function FitnessTab({
         )}
       </section>
     </>
+  );
+}
+
+type CoachMessageView = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: string;
+};
+type Api = (path: string, init?: RequestInit) => Promise<Record<string, unknown> | null>;
+
+const COACH_PROMPTS = [
+  "Что мне делать сегодня?",
+  "Разбери последнюю тренировку",
+  "План на неделю",
+  "Как я восстанавливаюсь?",
+];
+
+// Chat with the AI coach: it sees rides (with power from FIT files), watch data, sleep,
+// the schedule and today's food. 📎 sends a FIT export for a review.
+function CoachTab({ api }: { api: Api }) {
+  const [messages, setMessages] = useState<CoachMessageView[] | null>(null);
+  const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const endRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    void api("/api/miniapp/coach").then((body) =>
+      setMessages(Array.isArray(body?.messages) ? (body.messages as CoachMessageView[]) : []),
+    );
+  }, [api]);
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ block: "end" });
+  }, [messages, sending]);
+
+  async function run(init: RequestInit, optimistic: string) {
+    setSending(true);
+    setError(null);
+    setMessages((current) => [
+      ...(current ?? []),
+      { id: `local-${Date.now()}`, role: "user", content: optimistic, createdAt: "" },
+    ]);
+    const body = await api("/api/miniapp/coach", init);
+    if (Array.isArray(body?.messages)) setMessages(body.messages as CoachMessageView[]);
+    if (!body?.ok) {
+      setError(
+        typeof body?.message === "string"
+          ? body.message
+          : "Тренер не ответил. Попробуй ещё раз через минуту.",
+      );
+    }
+    setSending(false);
+  }
+
+  function send(raw: string) {
+    const message = raw.trim();
+    if (!message || sending) return;
+    setText("");
+    void run(
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message }),
+      },
+      message,
+    );
+  }
+
+  function upload(file: File) {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    void run({ method: "POST", body: form }, `📎 ${file.name}`);
+  }
+
+  async function reset() {
+    if (!(await confirmAction("Начать новый разговор? Данные и история тренировок останутся."))) {
+      return;
+    }
+    const body = await api("/api/miniapp/coach", { method: "DELETE" });
+    if (body?.ok) setMessages([]);
+  }
+
+  return (
+    <>
+      <div className={styles.header}>
+        <div className={styles.headerText}>
+          <span className={styles.caption}>видит тренировки, сон, расписание и еду</span>
+          <h1 className={styles.title}>Тренер</h1>
+        </div>
+        {messages?.length ? (
+          <button type="button" className={styles.secondary} onClick={() => void reset()}>
+            Новый разговор
+          </button>
+        ) : null}
+      </div>
+      {messages === null ? <span className={styles.caption}>Загружаю…</span> : null}
+      {messages?.length === 0 && !sending ? (
+        <div className={styles.card}>
+          <span>
+            Спроси что угодно про тренировки и восстановление. Чтобы я видел мощность — прикрепи
+            FIT-файл тренировки (📎) из Magene или Zwift: разберу ватты и интервалы.
+          </span>
+        </div>
+      ) : null}
+      <div className={styles.chat}>
+        {messages?.map((message) => (
+          <div
+            key={message.id}
+            className={message.role === "user" ? styles.bubbleUser : styles.bubbleCoach}
+          >
+            {message.role === "user" ? message.content : <Markdown text={message.content} />}
+          </div>
+        ))}
+        {sending ? (
+          <div className={styles.bubbleCoach}>
+            <span className={styles.caption}>Тренер думает… (до минуты)</span>
+          </div>
+        ) : null}
+        <div ref={endRef} />
+      </div>
+      {error ? <div className={styles.error}>{error}</div> : null}
+      <div className={styles.composer}>
+        <div className={styles.promptRow}>
+          {COACH_PROMPTS.map((prompt) => (
+            <button
+              key={prompt}
+              type="button"
+              className={styles.chip}
+              disabled={sending}
+              onClick={() => send(prompt)}
+            >
+              {prompt}
+            </button>
+          ))}
+        </div>
+        <div className={styles.composerRow}>
+          <input
+            ref={fileInput}
+            type="file"
+            className={styles.hidden}
+            aria-label="FIT-файл тренировки"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = "";
+              if (file) upload(file);
+            }}
+          />
+          <button
+            type="button"
+            className={styles.iconButton}
+            aria-label="Прикрепить FIT-файл тренировки"
+            disabled={sending}
+            onClick={() => fileInput.current?.click()}
+          >
+            📎
+          </button>
+          <textarea
+            className={styles.composerInput}
+            rows={1}
+            value={text}
+            placeholder="Спроси тренера…"
+            aria-label="Сообщение тренеру"
+            onChange={(event) => setText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                send(text);
+              }
+            }}
+          />
+          <button
+            type="button"
+            className={styles.primary}
+            style={{ minHeight: 44, padding: "0 16px" }}
+            aria-label="Отправить"
+            disabled={sending || !text.trim()}
+            onClick={() => send(text)}
+          >
+            ↑
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+type MarkdownBlock =
+  | { kind: "heading"; text: string }
+  | { kind: "paragraph"; lines: string[] }
+  | { kind: "list"; ordered: boolean; items: string[] }
+  | { kind: "table"; rows: string[][] }
+  | { kind: "rule" };
+
+// The coach answers in Markdown; this covers what it uses (headings, lists, tables, bold)
+// and renders everything as text — no HTML from the model ever reaches the page.
+function parseMarkdown(text: string): MarkdownBlock[] {
+  const blocks: MarkdownBlock[] = [];
+  const lines = text.replace(/\r/g, "").split("\n");
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) {
+      i += 1;
+      continue;
+    }
+    if (/^\s*\|/.test(line)) {
+      const rows: string[][] = [];
+      while (i < lines.length && /^\s*\|/.test(lines[i])) {
+        const cells = lines[i].trim().replace(/^\|/, "").replace(/\|$/, "").split("|");
+        if (!cells.every((cell) => /^\s*:?-{2,}:?\s*$/.test(cell))) {
+          rows.push(cells.map((cell) => cell.trim()));
+        }
+        i += 1;
+      }
+      blocks.push({ kind: "table", rows });
+      continue;
+    }
+    const heading = line.match(/^#{1,4}\s+(.*)$/);
+    if (heading) {
+      blocks.push({ kind: "heading", text: heading[1] });
+      i += 1;
+      continue;
+    }
+    if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) {
+      blocks.push({ kind: "rule" });
+      i += 1;
+      continue;
+    }
+    const listItem = /^\s*([-*•]|\d+[.)])\s+(.*)$/;
+    if (listItem.test(line)) {
+      const ordered = /^\s*\d/.test(line);
+      const items: string[] = [];
+      while (i < lines.length && listItem.test(lines[i])) {
+        items.push(lines[i].match(listItem)?.[2] ?? "");
+        i += 1;
+      }
+      blocks.push({ kind: "list", ordered, items });
+      continue;
+    }
+    const paragraph: string[] = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() &&
+      !/^\s*\|/.test(lines[i]) &&
+      !/^#{1,4}\s/.test(lines[i]) &&
+      !listItem.test(lines[i])
+    ) {
+      paragraph.push(lines[i]);
+      i += 1;
+    }
+    blocks.push({ kind: "paragraph", lines: paragraph });
+  }
+  return blocks;
+}
+
+function Inline({ text }: { text: string }) {
+  return (
+    <>
+      {text
+        .split(/(\*\*[^*]+\*\*|`[^`]+`)/g)
+        .map((part, index) =>
+          part.startsWith("**") && part.endsWith("**") && part.length > 4 ? (
+            <strong key={index}>{part.slice(2, -2)}</strong>
+          ) : part.startsWith("`") && part.endsWith("`") && part.length > 2 ? (
+            <code key={index}>{part.slice(1, -1)}</code>
+          ) : (
+            part
+          ),
+        )}
+    </>
+  );
+}
+
+function Markdown({ text }: { text: string }) {
+  return (
+    <div className={styles.markdown}>
+      {parseMarkdown(text).map((block, index) => {
+        if (block.kind === "heading") {
+          return (
+            <h3 key={index}>
+              <Inline text={block.text} />
+            </h3>
+          );
+        }
+        if (block.kind === "rule") return <hr key={index} />;
+        if (block.kind === "list") {
+          const items = block.items.map((item, itemIndex) => (
+            <li key={itemIndex}>
+              <Inline text={item} />
+            </li>
+          ));
+          return block.ordered ? <ol key={index}>{items}</ol> : <ul key={index}>{items}</ul>;
+        }
+        if (block.kind === "table") {
+          const [head, ...body] = block.rows;
+          return (
+            <div key={index} className={styles.tableWrap}>
+              <table>
+                {head ? (
+                  <thead>
+                    <tr>
+                      {head.map((cell, cellIndex) => (
+                        <th key={cellIndex}>
+                          <Inline text={cell} />
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                ) : null}
+                <tbody>
+                  {body.map((row, rowIndex) => (
+                    <tr key={rowIndex}>
+                      {row.map((cell, cellIndex) => (
+                        <td key={cellIndex}>
+                          <Inline text={cell} />
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        }
+        return (
+          <p key={index}>
+            {block.lines.map((line, lineIndex) => (
+              <span key={lineIndex}>
+                {lineIndex ? <br /> : null}
+                <Inline text={line} />
+              </span>
+            ))}
+          </p>
+        );
+      })}
+    </div>
   );
 }
 

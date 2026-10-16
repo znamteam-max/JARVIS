@@ -37,6 +37,7 @@ const envSchema = z.object({
   STRAVA_CLIENT_SECRET: z.string().optional(),
   INTERVALS_API_KEY: z.string().optional(),
   INTERVALS_ATHLETE_ID: z.string().default("0"),
+  COACH_MODEL: z.string().default("gpt-4.1"),
   MEDIA_WORKER_URL: z.string().url().optional(),
   MEDIA_WORKER_TOKEN: z.string().optional(),
   CALENDAR_PROVIDER: z.enum(["none", "google", "yandex"]).default("none"),

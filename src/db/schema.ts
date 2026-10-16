@@ -874,6 +874,54 @@ export const webSessions = assistantTable(
 );
 
 export type WebSession = typeof webSessions.$inferSelect;
+
+// The in-app coach: the owner's own training history/goals text plus settings (FTP...).
+export const coachProfiles = assistantTable("coach_profiles", {
+  userId: uuid("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  profile: text("profile").notNull(),
+  settings: jsonb("settings").$type<Record<string, unknown>>().notNull().default(emptyJson),
+  ...timestamps,
+});
+
+export const coachMessages = assistantTable(
+  "coach_messages",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    // user | assistant
+    role: text("role").notNull(),
+    content: text("content").notNull(),
+    // active | archived ("Новый разговор" archives the old thread)
+    status: text("status").notNull().default("active"),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default(emptyJson),
+    ...timestamps,
+  },
+  (table) => [index("coach_messages_user_created_idx").on(table.userId, table.createdAt)],
+);
+
+// Power data the watch never sees: summaries of FIT files from Magene/Zwift.
+export const rideFiles = assistantTable(
+  "ride_files",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    fileName: text("file_name"),
+    source: text("source").notNull().default("upload"),
+    summary: jsonb("summary").$type<Record<string, unknown>>().notNull(),
+    ...timestamps,
+  },
+  (table) => [index("ride_files_user_started_idx").on(table.userId, table.startedAt)],
+);
+
+export type CoachMessage = typeof coachMessages.$inferSelect;
+export type RideFile = typeof rideFiles.$inferSelect;
 export type FitnessActivity = typeof fitnessActivities.$inferSelect;
 export type WellnessDay = typeof wellnessDays.$inferSelect;
 
