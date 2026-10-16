@@ -259,3 +259,14 @@ export async function listFoodEntriesMissingPhoto(params: { since: Date; limit: 
     .orderBy(desc(foodEntries.createdAt))
     .limit(params.limit);
 }
+
+export async function setFoodEntryEatenAt(params: {
+  userId: string;
+  entryId: string;
+  eatenAt: Date;
+}) {
+  await getDb()
+    .update(foodEntries)
+    .set({ eatenAt: params.eatenAt, updatedAt: new Date() })
+    .where(and(eq(foodEntries.id, params.entryId), eq(foodEntries.userId, params.userId)));
+}

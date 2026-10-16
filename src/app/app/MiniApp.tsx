@@ -3,6 +3,19 @@
 import Script from "next/script";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import {
+  anchorDraft,
+  draftTotals,
+  draftWeight,
+  finishFoodDraft,
+  newDraftItem,
+  setDraftCalories,
+  setDraftGrams,
+  setDraftMacro,
+  setDraftName,
+  setDraftTotalWeight,
+  startFoodDraft,
+} from "@/domain/foodEdit";
 import type { MiniAppSummary } from "@/services/miniappSummary";
 
 import styles from "./miniapp.module.css";
@@ -18,6 +31,7 @@ type TelegramWebApp = {
   setBackgroundColor?(color: string): void;
   addToHomeScreen?(): void;
   showConfirm?(message: string, callback: (confirmed: boolean) => void): void;
+  isVersionAtLeast?(version: string): boolean;
 };
 declare global {
   interface Window {
@@ -36,6 +50,8 @@ const ERRORS: Record<string, string> = {
   photo_delete_failed: "Не получилось удалить фото. Попробуй ещё раз.",
   not_food_text: "Не понял, что за еда. Напиши, например: «гречка с курицей, тарелка».",
   invalid_time: "Время еды — не позже, чем сейчас, и не раньше, чем неделю назад.",
+  done_needs_bot: "Это событие ещё впереди — отметь его в боте, там можно уточнить, что произошло.",
+  invalid: "Проверь поля: у каждого продукта должно быть название.",
 };
 
 export function MiniApp() {
@@ -45,6 +61,7 @@ export function MiniApp() {
   const [tab, setTab] = useState<Tab>("today");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [installPrompt, setInstallPrompt] = useState<InstallPrompt | null>(null);
 
   const initDataRef = useRef("");
@@ -77,12 +94,22 @@ export function MiniApp() {
       const body = (await response.json().catch(() => ({}))) as {
         ok?: boolean;
         error?: string;
+        message?: string;
         summary?: MiniAppSummary;
       };
       if (!response.ok || !body.ok || !body.summary) {
         throw new Error(ERRORS[body.error ?? ""] ?? "Что-то пошло не так. Попробуй ещё раз.");
       }
       setSummary(body.summary);
+      // A short confirmation, so a tap never feels like it did nothing.
+      if (body.message) {
+        const message = body.message;
+        setNotice(message);
+        window.setTimeout(
+          () => setNotice((current) => (current === message ? null : current)),
+          5000,
+        );
+      }
       return true;
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -135,6 +162,11 @@ export function MiniApp() {
           />
         ) : null}
         {error ? <div className={styles.error}>{error}</div> : null}
+        {notice ? (
+          <div className={styles.notice} role="status">
+            {notice}
+          </div>
+        ) : null}
         {!summary && !needsLogin && !error ? <div className={styles.caption}>Загружаю…</div> : null}
         {summary && tab === "today" ? (
           <TodayTab
@@ -510,13 +542,25 @@ function PlanSectionCard({
               <div className={styles.header}>
                 <span>{row.text}</span>
                 {row.item ? (
-                  <button
-                    type="button"
-                    className={styles.linkButton}
-                    onClick={() => setEditing(editing === row.number ? null : row.number)}
-                  >
-                    {editing === row.number ? "Закрыть" : "Изменить"}
-                  </button>
+                  <span className={styles.rowActions}>
+                    {canMarkDone(row.item) ? (
+                      <button
+                        type="button"
+                        className={styles.linkButton}
+                        disabled={busy}
+                        onClick={() => void markDone(call, row.item!.id)}
+                      >
+                        Сделал
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      className={styles.linkButton}
+                      onClick={() => setEditing(editing === row.number ? null : row.number)}
+                    >
+                      {editing === row.number ? "Закрыть" : "Изменить"}
+                    </button>
+                  </span>
                 ) : null}
               </div>
               {row.details.map((detail) => (
@@ -540,6 +584,20 @@ function PlanSectionCard({
       {section.note ? <span className={styles.caption}>{section.note}</span> : null}
     </section>
   );
+}
+
+// Events count as done once they have started; tasks any time.
+function canMarkDone(item: EditableItem) {
+  const isEvent = ["event", "training", "tentative_event"].includes(item.kind);
+  return !isEvent || Boolean(item.startLocal && item.startLocal <= localNow());
+}
+
+async function markDone(call: Call, id: string) {
+  await call("/api/miniapp/item", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id, action: "done" }),
+  });
 }
 
 function EditItemForm({
@@ -714,6 +772,7 @@ function FoodTab({ summary, busy, call }: { summary: MiniAppSummary; busy: boole
   const [pending, setPending] = useState<{ blob: Blob; url: string } | null>(null);
   const [goalsOpen, setGoalsOpen] = useState(false);
   const [described, setDescribed] = useState<{ text: string; when: string } | null>(null);
+  const [zoomed, setZoomed] = useState<string | null>(null);
   const { food, goals } = summary;
   const maxValue = Math.max(goals.calories * 1.25, ...food.week.map((day) => day.calories), 1);
 
@@ -884,7 +943,13 @@ function FoodTab({ summary, busy, call }: { summary: MiniAppSummary; busy: boole
       </div>
 
       {food.today.map((entry) => (
-        <FoodCard key={`${entry.id}-${entry.calories}`} entry={entry} busy={busy} call={call} />
+        <FoodCard
+          key={`${entry.id}-${entry.calories}-${entry.title}`}
+          entry={entry}
+          busy={busy}
+          call={call}
+          zoom={setZoomed}
+        />
       ))}
 
       <section className={styles.card} aria-label="Неделя питания">
@@ -933,8 +998,15 @@ function FoodTab({ summary, busy, call }: { summary: MiniAppSummary; busy: boole
           <div className={styles.photoGrid}>
             {food.photos.map((photo) => (
               <figure key={photo.id} className={styles.photoTile}>
-                {/* eslint-disable-next-line @next/next/no-img-element -- signed private photo */}
-                <img src={photo.url} alt={photo.title} loading="lazy" />
+                <button
+                  type="button"
+                  className={styles.thumbButton}
+                  aria-label={`Открыть фото: ${photo.title}`}
+                  onClick={() => setZoomed(photo.url)}
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element -- signed private photo */}
+                  <img src={photo.url} alt={photo.title} loading="lazy" />
+                </button>
                 <figcaption>
                   {photo.label} · {photo.calories} ккал
                 </figcaption>
@@ -955,16 +1027,36 @@ function FoodTab({ summary, busy, call }: { summary: MiniAppSummary; busy: boole
           </span>
         </section>
       ) : null}
+
+      {zoomed ? (
+        <button
+          type="button"
+          className={styles.lightbox}
+          aria-label="Закрыть фото"
+          onClick={() => setZoomed(null)}
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element -- signed private photo */}
+          <img src={zoomed} alt="" />
+        </button>
+      ) : null}
     </>
   );
 }
 
-// Telegram's own dialog when available, the browser one otherwise.
+// Telegram's own dialog only inside Telegram 6.2+. Outside Telegram its script still
+// defines showConfirm but throws, which silently swallowed every "Удалить" tap.
 function confirmAction(message: string) {
   return new Promise<boolean>((resolve) => {
     const app = window.Telegram?.WebApp;
-    if (app?.showConfirm) app.showConfirm(message, resolve);
-    else resolve(window.confirm(message));
+    if (app?.initData && app.showConfirm && app.isVersionAtLeast?.("6.2")) {
+      try {
+        app.showConfirm(message, resolve);
+        return;
+      } catch {
+        // fall through to the browser dialog
+      }
+    }
+    resolve(window.confirm(message));
   });
 }
 
@@ -974,30 +1066,41 @@ async function removePhoto(call: Call, id: string) {
   }
 }
 
+type FoodEntryView = MiniAppSummary["food"]["today"][number];
+
 function FoodCard({
   entry,
   busy,
   call,
+  zoom,
 }: {
-  entry: MiniAppSummary["food"]["today"][number];
+  entry: FoodEntryView;
   busy: boolean;
   call: Call;
+  zoom: (url: string) => void;
 }) {
-  const [grams, setGrams] = useState(entry.items.map((item) => item.grams));
-
-  const changed = grams.some((value, index) => value !== entry.items[index]?.grams);
-  const step = (index: number, delta: number) =>
-    setGrams((current) =>
-      current.map((value, i) => (i === index ? Math.max(0, (value ?? 0) + delta) : value)),
-    );
+  const [editing, setEditing] = useState(false);
+  if (editing) {
+    return <FoodEditor entry={entry} busy={busy} call={call} close={() => setEditing(false)} />;
+  }
   return (
     <section className={styles.card} aria-label={entry.title}>
-      {entry.photoUrl ? (
-        // eslint-disable-next-line @next/next/no-img-element -- signed private photo
-        <img className={styles.foodPhoto} src={entry.photoUrl} alt={entry.title} loading="lazy" />
-      ) : null}
-      <div className={styles.header}>
-        <span style={{ fontSize: 17, fontWeight: 600 }}>{entry.title}</span>
+      <div className={styles.foodHead}>
+        {entry.photoUrl ? (
+          <button
+            type="button"
+            className={styles.thumbButton}
+            aria-label="Открыть фото"
+            onClick={() => zoom(entry.photoUrl!)}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element -- signed private photo */}
+            <img className={styles.thumb} src={entry.photoUrl} alt={entry.title} loading="lazy" />
+          </button>
+        ) : null}
+        <div className={styles.foodHeadText}>
+          <span style={{ fontSize: 17, fontWeight: 600 }}>{entry.title}</span>
+          <span className={styles.caption}>{entry.time}</span>
+        </div>
         <span className={styles.ringValue} style={{ fontSize: 18, color: "var(--accent)" }}>
           {entry.calories}
         </span>
@@ -1012,48 +1115,26 @@ function FoodCard({
         <span className={styles.pill} style={{ color: "var(--carbs)" }}>
           У {entry.carbsG}
         </span>
-        <span className={styles.caption}>{entry.time}</span>
       </div>
       {entry.items.map((item, index) => (
         <div key={`${item.name}-${index}`} className={styles.ingredient}>
           <span className={styles.ingredientName}>{item.name}</span>
-          <button
-            type="button"
-            className={styles.iconButton}
-            aria-label={`Меньше: ${item.name}`}
-            onClick={() => step(index, -10)}
-          >
-            −
-          </button>
-          <span className={styles.grams}>{grams[index] ?? "—"} г</span>
-          <button
-            type="button"
-            className={styles.iconButton}
-            aria-label={`Больше: ${item.name}`}
-            onClick={() => step(index, 10)}
-          >
-            +
-          </button>
+          <span className={styles.caption}>
+            {item.grams ? `${item.grams} г · ` : ""}
+            {item.calories} ккал
+          </span>
         </div>
       ))}
       <div className={styles.chips}>
-        {changed ? (
-          <button
-            type="button"
-            className={styles.primary}
-            style={{ flex: 1, minHeight: 44 }}
-            disabled={busy}
-            onClick={() =>
-              void call("/api/miniapp/food", {
-                method: "PATCH",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({ id: entry.id, grams }),
-              })
-            }
-          >
-            Сохранить
-          </button>
-        ) : null}
+        <button
+          type="button"
+          className={styles.primary}
+          style={{ flex: 1, minHeight: 44 }}
+          disabled={busy}
+          onClick={() => setEditing(true)}
+        >
+          Изменить
+        </button>
         {entry.photoUrl ? (
           <button
             type="button"
@@ -1079,6 +1160,222 @@ function FoodCard({
         </button>
       </div>
     </section>
+  );
+}
+
+// Everything is editable; the calculator in domain/foodEdit keeps К, Б, Ж, У and the
+// weights consistent while you type.
+function FoodEditor({
+  entry,
+  busy,
+  call,
+  close,
+}: {
+  entry: FoodEntryView;
+  busy: boolean;
+  call: Call;
+  close: () => void;
+}) {
+  const [title, setTitle] = useState(entry.title);
+  const [when, setWhen] = useState(entry.eatenAtLocal);
+  const [items, setItems] = useState(() => startFoodDraft(entry.items));
+  const totals = draftTotals(items);
+  const weight = draftWeight(items);
+  const anchor = () => setItems((current) => anchorDraft(current));
+  const update = (
+    index: number,
+    change: (item: (typeof items)[number]) => (typeof items)[number],
+  ) => setItems((current) => current.map((item, i) => (i === index ? change(item) : item)));
+  const id = (field: string) => `${entry.id}-${field}`;
+
+  async function save() {
+    const finished = finishFoodDraft(items);
+    if (!finished.length) return;
+    const saved = await call("/api/miniapp/food", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: entry.id,
+        title: title.trim() || entry.title,
+        eatenAtLocal: when,
+        items: finished,
+      }),
+    });
+    if (saved) close();
+  }
+
+  return (
+    <section className={styles.card} aria-label={`Изменить: ${entry.title}`}>
+      <label className={styles.caption} htmlFor={id("title")}>
+        Название
+      </label>
+      <input
+        id={id("title")}
+        className={styles.input}
+        value={title}
+        onChange={(event) => setTitle(event.target.value)}
+      />
+      <label className={styles.caption} htmlFor={id("when")}>
+        Когда
+      </label>
+      <input
+        id={id("when")}
+        className={styles.input}
+        type="datetime-local"
+        value={when}
+        max={localNow()}
+        onChange={(event) => setWhen(event.target.value)}
+      />
+      <div className={styles.field}>
+        <span style={{ whiteSpace: "nowrap" }}>Вес блюда, г</span>
+        <NumberField
+          id={id("weight")}
+          label=""
+          value={weight || null}
+          onChange={(value) => setItems((current) => setDraftTotalWeight(current, value ?? 0))}
+          onBlur={anchor}
+        />
+      </div>
+      {items.map((item, index) => (
+        <div key={index} className={styles.editItem}>
+          <div className={styles.ingredient}>
+            <input
+              className={styles.input}
+              value={item.name}
+              placeholder="Продукт"
+              aria-label="Продукт"
+              onChange={(event) => update(index, (row) => setDraftName(row, event.target.value))}
+            />
+            <button
+              type="button"
+              className={styles.iconButton}
+              aria-label={`Убрать: ${item.name || "продукт"}`}
+              onClick={() => setItems((current) => current.filter((_, i) => i !== index))}
+            >
+              ✕
+            </button>
+          </div>
+          <div className={styles.macroInputs}>
+            <NumberField
+              id={id(`${index}-g`)}
+              label="г"
+              value={item.grams}
+              onChange={(value) => update(index, (row) => setDraftGrams(row, value))}
+              onBlur={anchor}
+            />
+            <NumberField
+              id={id(`${index}-p`)}
+              label="Б"
+              color="var(--protein)"
+              value={item.proteinG}
+              onChange={(value) =>
+                update(index, (row) => setDraftMacro(row, "proteinG", value ?? 0))
+              }
+            />
+            <NumberField
+              id={id(`${index}-f`)}
+              label="Ж"
+              color="var(--fat)"
+              value={item.fatG}
+              onChange={(value) => update(index, (row) => setDraftMacro(row, "fatG", value ?? 0))}
+            />
+            <NumberField
+              id={id(`${index}-c`)}
+              label="У"
+              color="var(--carbs)"
+              value={item.carbsG}
+              onChange={(value) => update(index, (row) => setDraftMacro(row, "carbsG", value ?? 0))}
+            />
+            <NumberField
+              id={id(`${index}-k`)}
+              label="ккал"
+              color="var(--accent)"
+              value={item.calories}
+              onChange={(value) => update(index, (row) => setDraftCalories(row, value ?? 0))}
+              onBlur={anchor}
+            />
+          </div>
+        </div>
+      ))}
+      <button
+        type="button"
+        className={styles.secondary}
+        onClick={() => setItems((current) => [...current, newDraftItem()])}
+      >
+        + Продукт
+      </button>
+      <div className={styles.editTotals}>
+        <span>Итого</span>
+        <span>
+          <b style={{ color: "var(--accent)" }}>{totals.calories} ккал</b> · Б {totals.proteinG} · Ж{" "}
+          {totals.fatG} · У {totals.carbsG}
+        </span>
+      </div>
+      <span className={styles.caption}>
+        Калории считаются сами: белки и углеводы по 4 ккал на грамм, жиры — 9. Вес меняет всё
+        пропорционально.
+      </span>
+      <div className={styles.chips}>
+        <button
+          type="button"
+          className={styles.primary}
+          style={{ flex: 1, minHeight: 44 }}
+          disabled={busy || !finishFoodDraft(items).length}
+          onClick={() => void save()}
+        >
+          Сохранить
+        </button>
+        <button type="button" className={styles.secondary} disabled={busy} onClick={close}>
+          Отмена
+        </button>
+      </div>
+    </section>
+  );
+}
+
+// Shows what you type while focused (so "1" → "12" → "120" works), the calculated value
+// otherwise.
+function NumberField({
+  id,
+  label,
+  value,
+  color,
+  onChange,
+  onBlur,
+}: {
+  id: string;
+  label: string;
+  value: number | null;
+  color?: string;
+  onChange: (value: number | null) => void;
+  onBlur?: () => void;
+}) {
+  const [text, setText] = useState<string | null>(null);
+  return (
+    <label className={styles.macroField} htmlFor={id}>
+      {label ? <span style={color ? { color } : undefined}>{label}</span> : null}
+      <input
+        id={id}
+        className={styles.macroInput}
+        inputMode="decimal"
+        value={text ?? (value === null ? "" : String(value))}
+        onFocus={(event) => {
+          setText(value === null ? "" : String(value));
+          event.target.select();
+        }}
+        onChange={(event) => {
+          const raw = event.target.value;
+          setText(raw);
+          if (!raw.trim()) return onChange(null);
+          const parsed = Number(raw.replace(",", "."));
+          if (Number.isFinite(parsed) && parsed >= 0) onChange(parsed);
+        }}
+        onBlur={() => {
+          setText(null);
+          onBlur?.();
+        }}
+      />
+    </label>
   );
 }
 

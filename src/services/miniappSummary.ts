@@ -33,7 +33,10 @@ export async function buildMiniAppSummary(user: User, now = new Date()) {
 
   const dayOf = (date: Date) =>
     DateTime.fromJSDate(date, { zone: "utc" }).setZone(timezone).toISODate() ?? "";
-  const todayFood = foodSince.filter((entry) => dayOf(entry.eatenAt) === today);
+  // Newest additions first, so what was just logged is always on top.
+  const todayFood = foodSince
+    .filter((entry) => dayOf(entry.eatenAt) === today)
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
   const todayWorkouts = activities.filter((activity) => dayOf(activity.startAt) === today);
   const workoutCalories = todayWorkouts.reduce((sum, a) => sum + (a.calories ?? 0), 0);
   const eaten = sumFoodMacros(todayFood);
@@ -157,6 +160,9 @@ function foodView(entry: FoodEntry, timezone: string) {
     id: entry.id,
     title: entry.title,
     time: DateTime.fromJSDate(entry.eatenAt, { zone: "utc" }).setZone(timezone).toFormat("HH:mm"),
+    eatenAtLocal: DateTime.fromJSDate(entry.eatenAt, { zone: "utc" })
+      .setZone(timezone)
+      .toFormat("yyyy-MM-dd'T'HH:mm"),
     calories: entry.calories,
     proteinG: entry.proteinG,
     fatG: entry.fatG,
@@ -166,6 +172,9 @@ function foodView(entry: FoodEntry, timezone: string) {
       name: String(item.name ?? ""),
       grams: typeof item.grams === "number" ? item.grams : null,
       calories: Number(item.calories ?? 0),
+      proteinG: Number(item.proteinG ?? 0),
+      fatG: Number(item.fatG ?? 0),
+      carbsG: Number(item.carbsG ?? 0),
     })),
   };
 }

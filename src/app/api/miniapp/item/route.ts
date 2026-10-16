@@ -1,3 +1,4 @@
+import { DateTime } from "luxon";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -10,6 +11,7 @@ import {
   type ItemEditMutation,
 } from "@/services/itemEditMutations";
 import { buildMiniAppSummary } from "@/services/miniappSummary";
+import { completePlannerItemFromApp } from "@/services/plannerItemComplete";
 import { deletePlannerItemEverywhere } from "@/services/plannerItemDelete";
 
 export const runtime = "nodejs";
@@ -102,5 +104,42 @@ export async function DELETE(request: Request) {
     source: "miniapp_delete",
   });
   if (!deleted) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
-  return NextResponse.json({ ok: true, summary: await buildMiniAppSummary(owner) });
+  return NextResponse.json({
+    ok: true,
+    message: `Удалил «${deleted.item.title}».`,
+    summary: await buildMiniAppSummary(owner),
+  });
+}
+
+const actionSchema = z.object({ id: z.string().uuid(), action: z.literal("done") });
+
+// "Сделал": a recurring task closes only this round, anything else is completed.
+export async function POST(request: Request) {
+  const owner = await resolveMiniAppOwner(request);
+  if (!owner) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  const body = actionSchema.safeParse(await request.json().catch(() => null));
+  if (!body.success) return NextResponse.json({ ok: false, error: "invalid" }, { status: 400 });
+  const result = await completePlannerItemFromApp({
+    userId: owner.id,
+    itemId: body.data.id,
+    timezone: owner.timezone,
+  });
+  if (result.outcome === "missing") {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  }
+  if (result.outcome === "needs_clarification") {
+    return NextResponse.json({ ok: false, error: "done_needs_bot" }, { status: 409 });
+  }
+  const next =
+    result.outcome === "occurrence" && result.nextFireAt
+      ? DateTime.fromISO(result.nextFireAt, { zone: "utc" })
+          .setZone(owner.timezone)
+          .setLocale("ru")
+          .toFormat("ccc d MMMM, HH:mm")
+      : null;
+  const message =
+    result.outcome === "occurrence"
+      ? `Отметил этот раз «${result.item.title}».${next ? ` Следующий — ${next}.` : ""}`
+      : `Готово: «${result.item.title}».`;
+  return NextResponse.json({ ok: true, message, summary: await buildMiniAppSummary(owner) });
 }

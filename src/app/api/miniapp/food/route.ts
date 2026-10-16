@@ -12,9 +12,11 @@ import {
   deleteFoodEntry,
   getFoodEntryById,
   insertFoodEntry,
+  setFoodEntryEatenAt,
   toFoodEstimate,
   updateFoodEntryEstimate,
 } from "@/db/queries/food";
+import { sumFoodMacros } from "@/domain/foodEstimate";
 import { scaleFoodItems } from "@/domain/miniapp";
 import { logger } from "@/lib/logger";
 import { resolveMiniAppOwner } from "@/lib/telegramWebApp";
@@ -41,6 +43,34 @@ const gramsSchema = z.object({
   id: z.string().uuid(),
   grams: z.array(z.number().min(0).max(3000).nullable()).max(30),
 });
+
+const amount = (max: number) => z.number().min(0).max(max);
+
+// The full editor: title, time and every product's weight and КБЖУ (the browser's
+// calculator keeps them consistent; the server re-adds the totals itself).
+const fullEditSchema = z.object({
+  id: z.string().uuid(),
+  title: z.string().trim().min(1).max(120),
+  eatenAtLocal: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/)
+    .optional(),
+  items: z
+    .array(
+      z.object({
+        name: z.string().trim().min(1).max(80),
+        grams: amount(5000).nullable(),
+        calories: amount(10000),
+        proteinG: amount(1000),
+        fatG: amount(1000),
+        carbsG: amount(1000),
+      }),
+    )
+    .min(1)
+    .max(30),
+});
+
+const MAX_EDIT_BACKDATE_DAYS = 30;
 
 // JSON = a meal described in words ("ate it and forgot the photo"); multipart = a photo.
 export async function POST(request: Request) {
@@ -123,6 +153,48 @@ async function logFoodFromText(request: Request, owner: User) {
   return NextResponse.json({ ok: true, summary: await buildMiniAppSummary(owner) });
 }
 
+async function saveFullEdit(raw: unknown, owner: User) {
+  const body = fullEditSchema.safeParse(raw);
+  if (!body.success) return NextResponse.json({ ok: false, error: "invalid" }, { status: 400 });
+  const entry = await getFoodEntryById({ userId: owner.id, entryId: body.data.id });
+  if (!entry) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+
+  let eatenAt: Date | null = null;
+  if (body.data.eatenAtLocal) {
+    const local = DateTime.fromISO(body.data.eatenAtLocal, { zone: owner.timezone }).toUTC();
+    const now = DateTime.utc();
+    if (
+      !local.isValid ||
+      local > now.plus({ minutes: 5 }) ||
+      local < now.minus({ days: MAX_EDIT_BACKDATE_DAYS })
+    ) {
+      return NextResponse.json({ ok: false, error: "invalid_time" }, { status: 400 });
+    }
+    // The form shows minutes only, so an untouched time must not drop the seconds.
+    const minute = (ms: number) => Math.floor(ms / 60_000);
+    if (minute(entry.eatenAt.getTime()) !== minute(local.toMillis())) eatenAt = local.toJSDate();
+  }
+
+  const items = body.data.items.map((item) => ({
+    name: item.name,
+    grams: item.grams === null ? null : Math.round(item.grams),
+    calories: Math.round(item.calories),
+    proteinG: Math.round(item.proteinG),
+    fatG: Math.round(item.fatG),
+    carbsG: Math.round(item.carbsG),
+  }));
+  const totals = sumFoodMacros(items);
+  await updateFoodEntryEstimate({
+    userId: owner.id,
+    entryId: entry.id,
+    estimate: { ...toFoodEstimate(entry), title: body.data.title, items, ...totals },
+    correction: "изменено вручную в приложении",
+    at: new Date(),
+  });
+  if (eatenAt) await setFoodEntryEatenAt({ userId: owner.id, entryId: entry.id, eatenAt });
+  return NextResponse.json({ ok: true, summary: await buildMiniAppSummary(owner) });
+}
+
 async function auditUsage(owner: User, result: FoodEstimationResult, capability: string) {
   await writeAudit({
     userId: owner.id,
@@ -142,7 +214,9 @@ async function auditUsage(owner: User, result: FoodEstimationResult, capability:
 export async function PATCH(request: Request) {
   const owner = await resolveMiniAppOwner(request);
   if (!owner) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  const body = gramsSchema.safeParse(await request.json().catch(() => null));
+  const raw: unknown = await request.json().catch(() => null);
+  if (raw && typeof raw === "object" && "items" in raw) return saveFullEdit(raw, owner);
+  const body = gramsSchema.safeParse(raw);
   if (!body.success) return NextResponse.json({ ok: false, error: "invalid" }, { status: 400 });
   const entry = await getFoodEntryById({ userId: owner.id, entryId: body.data.id });
   if (!entry) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
