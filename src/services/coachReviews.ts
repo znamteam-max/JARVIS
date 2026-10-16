@@ -120,7 +120,9 @@ export async function reviewNewWorkoutsIfDue(now = new Date()) {
     metadata: { auto: true, activityIds: activities.map((activity) => activity.id) },
   });
   try {
-    const review = await generateCoachReply(owner, now, AUTO_REVIEW_INSTRUCTION);
+    const review = await generateCoachReply(owner, now, AUTO_REVIEW_INSTRUCTION, {
+      claudeModel: getEnv().CLAUDE_REVIEW_MODEL,
+    });
     await notifyOwner(owner, coachNotificationExcerpt(review));
   } catch (error) {
     logger.warn("Automatic coach review failed", {

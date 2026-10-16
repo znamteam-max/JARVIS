@@ -38,6 +38,11 @@ const envSchema = z.object({
   INTERVALS_API_KEY: z.string().optional(),
   INTERVALS_ATHLETE_ID: z.string().default("0"),
   COACH_MODEL: z.string().default("gpt-4.1"),
+  // Claude Code on the owner's Max subscription in a Cloudflare container.
+  CLAUDE_RELAY_URL: z.string().url().optional(),
+  CLAUDE_RELAY_TOKEN: z.string().optional(),
+  CLAUDE_CHAT_MODEL: z.string().default("sonnet"),
+  CLAUDE_REVIEW_MODEL: z.string().default("opus"),
   MEDIA_WORKER_URL: z.string().url().optional(),
   MEDIA_WORKER_TOKEN: z.string().optional(),
   CALENDAR_PROVIDER: z.enum(["none", "google", "yandex"]).default("none"),

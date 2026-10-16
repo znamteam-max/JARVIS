@@ -5,7 +5,8 @@ import { archiveCoachConversation } from "@/db/queries/coach";
 import { UserFacingError } from "@/lib/errors";
 import { logger } from "@/lib/logger";
 import { resolveMiniAppOwner } from "@/lib/telegramWebApp";
-import { askCoach, listCoachConversation, uploadRideToCoach } from "@/services/coach";
+import { listCoachConversation, uploadRideToCoach } from "@/services/coach";
+import { askJarvis } from "@/services/jarvisAgent";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -44,8 +45,8 @@ export async function POST(request: Request) {
     }
     const body = messageSchema.safeParse(await request.json().catch(() => null));
     if (!body.success) return NextResponse.json({ ok: false, error: "invalid" }, { status: 400 });
-    const messages = await askCoach({ user: owner, message: body.data.message });
-    return NextResponse.json({ ok: true, messages });
+    const { messages, changed } = await askJarvis({ user: owner, message: body.data.message });
+    return NextResponse.json({ ok: true, messages, changed });
   } catch (error) {
     if (error instanceof UserFacingError) {
       return NextResponse.json(

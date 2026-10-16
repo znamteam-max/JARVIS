@@ -1,0 +1,12 @@
+{
+  "name": "jarvis-claude",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "npx wrangler@4 deploy"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "0.3.7"
+  }
+}

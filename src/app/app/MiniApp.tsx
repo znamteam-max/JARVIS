@@ -208,7 +208,9 @@ export function MiniApp() {
         ) : null}
         {summary && tab === "plan" ? <PlanTab summary={summary} call={call} busy={busy} /> : null}
         {summary && tab === "food" ? <FoodTab summary={summary} busy={busy} call={call} /> : null}
-        {summary && tab === "coach" ? <CoachTab api={api} /> : null}
+        {summary && tab === "coach" ? (
+          <CoachTab api={api} refresh={() => void call("/api/miniapp/summary")} />
+        ) : null}
         {summary && tab === "fitness" ? (
           <FitnessTab summary={summary} call={call} busy={busy} />
         ) : null}
@@ -220,7 +222,7 @@ export function MiniApp() {
             ["plan", "Расписание", "M4 6h16M4 12h16M4 18h10"],
             ["food", "Питание", "M7 3v8M5 3v5a2 2 0 0 0 4 0V3M7 11v10M17 3c-2 2-2 6 0 8v10"],
             ["fitness", "Тренировки", "M3 12h4l3-7 4 14 3-7h4"],
-            ["coach", "Тренер", "M4 5h16v11H9l-5 4z"],
+            ["coach", "JARVIS", "M4 5h16v11H9l-5 4z"],
           ] as Array<[Tab, string, string]>
         ).map(([id, label, icon]) => (
           <button
@@ -2007,15 +2009,15 @@ type CoachMessageView = {
 type Api = (path: string, init?: RequestInit) => Promise<Record<string, unknown> | null>;
 
 const COACH_PROMPTS = [
-  "Что мне делать сегодня?",
+  "Что у меня сегодня?",
+  "Что мне делать на тренировке сегодня?",
   "Разбери последнюю тренировку",
-  "План на неделю",
-  "Как я восстанавливаюсь?",
+  "План тренировок на неделю",
 ];
 
 // Chat with the AI coach: it sees rides (with power from FIT files), watch data, sleep,
 // the schedule and today's food. 📎 sends a FIT export for a review.
-function CoachTab({ api }: { api: Api }) {
+function CoachTab({ api, refresh }: { api: Api; refresh: () => void }) {
   const [messages, setMessages] = useState<CoachMessageView[] | null>(null);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
@@ -2042,6 +2044,8 @@ function CoachTab({ api }: { api: Api }) {
     ]);
     const body = await api("/api/miniapp/coach", init);
     if (Array.isArray(body?.messages)) setMessages(body.messages as CoachMessageView[]);
+    // Claude changed the schedule/food: the other tabs must show it.
+    if (body?.changed) refresh();
     if (!body?.ok) {
       setError(
         typeof body?.message === "string"
@@ -2084,8 +2088,8 @@ function CoachTab({ api }: { api: Api }) {
     <>
       <div className={styles.header}>
         <div className={styles.headerText}>
-          <span className={styles.caption}>видит тренировки, сон, расписание и еду</span>
-          <h1 className={styles.title}>Тренер</h1>
+          <span className={styles.caption}>дела, еда, тренировки — пиши как человеку</span>
+          <h1 className={styles.title}>JARVIS</h1>
         </div>
         {messages?.length ? (
           <button type="button" className={styles.secondary} onClick={() => void reset()}>
@@ -2097,8 +2101,9 @@ function CoachTab({ api }: { api: Api }) {
       {messages?.length === 0 && !sending ? (
         <div className={styles.card}>
           <span>
-            Спроси что угодно про тренировки и восстановление. Чтобы я видел мощность — прикрепи
-            FIT-файл тренировки (📎) из Magene или Zwift: разберу ватты и интервалы.
+            Пиши как человеку: «напомни 21-го в 10 оплатить кружок», «перенеси ортодонта на
+            четверг», «съел гречку с курицей», «что мне делать на тренировке сегодня?». Я сделаю и
+            отвечу, что сделал. 📎 — FIT-файл тренировки, если её нет в Zwift.
           </span>
         </div>
       ) : null}
@@ -2119,7 +2124,7 @@ function CoachTab({ api }: { api: Api }) {
         )}
         {sending ? (
           <div className={styles.bubbleCoach}>
-            <span className={styles.caption}>Тренер думает… (до минуты)</span>
+            <span className={styles.caption}>JARVIS думает… (до минуты)</span>
           </div>
         ) : null}
         <div ref={endRef} />
@@ -2164,7 +2169,7 @@ function CoachTab({ api }: { api: Api }) {
             className={styles.composerInput}
             rows={1}
             value={text}
-            placeholder="Спроси тренера…"
+            placeholder="Напиши JARVIS…"
             aria-label="Сообщение тренеру"
             onChange={(event) => setText(event.target.value)}
             onKeyDown={(event) => {

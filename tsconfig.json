@@ -29,5 +29,5 @@
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts"
   ],
-  "exclude": ["node_modules", "cloudflare-reminder-worker", "cloudflare-media-worker", "src/tests"]
+  "exclude": ["node_modules", "cloudflare-reminder-worker", "cloudflare-media-worker", "cloudflare-claude-worker", "src/tests"]
 }

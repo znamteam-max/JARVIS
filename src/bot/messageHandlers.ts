@@ -1,4 +1,8 @@
 import type { Bot } from "grammy";
+import { after } from "next/server";
+
+import type { User } from "@/db/schema";
+import { shadowJarvisDecision } from "@/services/jarvisAgent";
 
 import { transcribeMediaWithUsage } from "@/ai/transcription";
 import { recordMessageAttachment, markTelegramMessageProcessed } from "@/db/queries/messages";
@@ -187,6 +191,7 @@ async function handleNavigationText(ctx: BotContext, text: string) {
 
 async function handleNaturalText(ctx: BotContext, text: string) {
   const owner = requireOwner(ctx);
+  scheduleJarvisShadow(owner, text);
   try {
     await handleNaturalLanguageTurn(ctx, text, owner.timezone);
     if (ctx.dbMessageId) await markTelegramMessageProcessed(ctx.dbMessageId);
@@ -202,6 +207,17 @@ async function handleNaturalLanguageTurn(ctx: BotContext, text: string, timezone
     return;
   }
   await handleIncomingUserMessage(ctx, text, timezone);
+}
+
+// Shadow week: JARVIS (Claude) decides on the same message after the response, its
+// decision is only recorded (assistant.jarvis_shadow) to compare with the old bot.
+function scheduleJarvisShadow(owner: User, text: string) {
+  const run = () => shadowJarvisDecision(owner, text).catch(() => undefined);
+  try {
+    after(run);
+  } catch {
+    void run();
+  }
 }
 
 function toUserMessage(error: unknown): string {

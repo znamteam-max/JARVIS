@@ -2,11 +2,7 @@ import { DateTime } from "luxon";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import {
-  estimateFoodFromImage,
-  estimateFoodFromText,
-  type FoodEstimationResult,
-} from "@/ai/foodEstimation";
+import { estimateFoodFromImage, type FoodEstimationResult } from "@/ai/foodEstimation";
 import { writeAudit } from "@/db/queries/audit";
 import {
   deleteFoodEntry,
@@ -21,6 +17,7 @@ import { scaleFoodItems } from "@/domain/miniapp";
 import { logger } from "@/lib/logger";
 import { resolveMiniAppOwner } from "@/lib/telegramWebApp";
 import type { User } from "@/db/schema";
+import { FoodLogError, logFoodFromText } from "@/services/foodLog";
 import { deleteFoodPhoto, saveFoodPhoto } from "@/services/foodPhotos";
 import { buildMiniAppSummary } from "@/services/miniappSummary";
 
@@ -28,8 +25,6 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const MAX_PHOTO_BYTES = 4 * 1024 * 1024;
-
-const MAX_BACKDATE_DAYS = 7;
 
 const textSchema = z.object({
   text: z.string().trim().min(2).max(500),
@@ -77,7 +72,7 @@ export async function POST(request: Request) {
   const owner = await resolveMiniAppOwner(request);
   if (!owner) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   if (request.headers.get("content-type")?.includes("application/json")) {
-    return logFoodFromText(request, owner);
+    return logFoodText(request, owner);
   }
   const form = await request.formData().catch(() => null);
   const photo = form?.get("photo");
@@ -115,36 +110,23 @@ export async function POST(request: Request) {
   return NextResponse.json({ ok: true, summary: await buildMiniAppSummary(owner) });
 }
 
-async function logFoodFromText(request: Request, owner: User) {
+async function logFoodText(request: Request, owner: User) {
   const body = textSchema.safeParse(await request.json().catch(() => null));
   if (!body.success) return NextResponse.json({ ok: false, error: "invalid" }, { status: 400 });
-  const now = DateTime.utc();
-  const eatenAt = body.data.eatenAtLocal
-    ? DateTime.fromISO(body.data.eatenAtLocal, { zone: owner.timezone }).toUTC()
-    : now;
-  if (
-    !eatenAt.isValid ||
-    eatenAt > now.plus({ minutes: 5 }) ||
-    eatenAt < now.minus({ days: MAX_BACKDATE_DAYS })
-  ) {
-    return NextResponse.json({ ok: false, error: "invalid_time" }, { status: 400 });
-  }
   try {
-    const result = await estimateFoodFromText({ text: body.data.text });
-    await auditUsage(owner, result, "food_estimation_text_miniapp");
-    if (!result.estimate.isFood) {
-      return NextResponse.json({ ok: false, error: "not_food_text" }, { status: 422 });
-    }
-    await insertFoodEntry({
-      userId: owner.id,
-      sourceMessageId: null,
-      telegramFileId: null,
-      caption: body.data.text,
-      eatenAt: eatenAt.toJSDate(),
-      estimate: result.estimate,
-      model: result.model,
+    await logFoodFromText({
+      user: owner,
+      text: body.data.text,
+      eatenAtLocal: body.data.eatenAtLocal,
+      capability: "food_estimation_text_miniapp",
     });
   } catch (error) {
+    if (error instanceof FoodLogError) {
+      return NextResponse.json(
+        { ok: false, error: error.code },
+        { status: error.code === "invalid_time" ? 400 : 422 },
+      );
+    }
     logger.warn("Mini App text food estimation failed", {
       error: error instanceof Error ? error.message : String(error),
     });

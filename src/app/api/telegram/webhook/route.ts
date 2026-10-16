@@ -7,6 +7,8 @@ import { constantTimeEquals } from "@/lib/secrets";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// JARVIS shadow decisions run after the response (next/server after) and need time.
+export const maxDuration = 60;
 
 export async function POST(request: Request) {
   const secret = requireEnv("TELEGRAM_WEBHOOK_SECRET");

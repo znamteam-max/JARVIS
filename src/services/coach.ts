@@ -1,5 +1,6 @@
 import { DateTime } from "luxon";
 
+import { askClaudeRelay, isClaudeRelayConfigured } from "@/ai/claudeRelay";
 import { getOpenAIClient } from "@/ai/openaiClient";
 import { writeAudit } from "@/db/queries/audit";
 import {
@@ -11,7 +12,7 @@ import {
   upsertRideFile,
 } from "@/db/queries/coach";
 import { listFitnessActivitiesSince, listWellnessDaysSince } from "@/db/queries/fitness";
-import type { User } from "@/db/schema";
+import type { CoachMessage, User } from "@/db/schema";
 import { activityWatts, withoutWatchDuplicates } from "@/domain/activityDedupe";
 import { formatRideForCoach, type RideSummary } from "@/domain/rideAnalysis";
 import { sportLabel } from "@/domain/stravaActivity";
@@ -19,13 +20,13 @@ import { parseFitRide } from "@/integrations/fitFile";
 import { getEnv } from "@/lib/env";
 import { UserFacingError } from "@/lib/errors";
 import { logger } from "@/lib/logger";
-import { buildMiniAppSummary } from "@/services/miniappSummary";
+import { buildMiniAppSummary, type MiniAppSummary } from "@/services/miniappSummary";
 
 const HISTORY_MESSAGES = 16;
 const DAILY_QUESTION_LIMIT = 60;
 const DEFAULT_FTP = 300;
 
-const COACH_INSTRUCTIONS = `Ты — личный тренер владельца приложения JARVIS по велоспорту и выносливости, и заодно помощник по его дню. Отвечай по-русски.
+export const COACH_INSTRUCTIONS = `Ты — личный тренер владельца приложения JARVIS по велоспорту и выносливости, и заодно помощник по его дню. Отвечай по-русски.
 
 Стиль: прямо и по делу, без лишней похвалы и клише («не геройствуй» и т.п.), цифрами. Сравнивай тренировки числами. Если сравниваешь или даёшь план по дням — таблицей (не больше 5 колонок, экран телефона). Не повторяй одни и те же предостережения. Если данных нет или они ненадёжны — так и скажи, не изображай точность. Ответ компактный: для телефона.
 
@@ -74,7 +75,11 @@ export function coachFtp(settings: Record<string, unknown> | undefined) {
 
 // Everything the coach knows, as plain text: profile, power rides, watch data, recovery,
 // today's schedule and food.
-export async function buildCoachContext(user: User, now = new Date()) {
+export async function buildCoachContext(
+  user: User,
+  now = new Date(),
+  preparedSummary?: MiniAppSummary,
+) {
   const tz = user.timezone;
   const local = DateTime.fromJSDate(now, { zone: "utc" }).setZone(tz).setLocale("ru");
   const label = (date: Date) =>
@@ -87,7 +92,7 @@ export async function buildCoachContext(user: User, now = new Date()) {
     listRideFilesSince(user.id, local.minus({ days: 42 }).toJSDate()),
     listFitnessActivitiesSince(user.id, local.minus({ days: 21 }).toJSDate()),
     listWellnessDaysSince(user.id, local.minus({ days: 14 }).toISODate() ?? ""),
-    buildMiniAppSummary(user, now),
+    preparedSummary ?? buildMiniAppSummary(user, now),
   ]);
   const settings = profile?.settings ?? {};
 
@@ -160,12 +165,57 @@ export async function buildCoachContext(user: User, now = new Date()) {
 }
 
 // Answers the latest message in the thread, stores the answer and returns its text.
-export async function generateCoachReply(user: User, now: Date, extraInstruction?: string) {
+function coachTranscript(history: CoachMessage[]) {
+  const lines = history.map((message) => {
+    const who =
+      message.metadata?.auto === true
+        ? "Система"
+        : message.role === "assistant"
+          ? "Тренер"
+          : "Владелец";
+    return `${who}: ${message.content}`;
+  });
+  return `Переписка (последние сообщения):\n\n${lines.join("\n\n")}\n\nОтветь на последнее сообщение.`;
+}
+
+// Claude (owner's subscription, via the Cloudflare relay) answers first; OpenAI steps in
+// when the relay is not configured or fails, so the chat is never silent.
+export async function generateCoachReply(
+  user: User,
+  now: Date,
+  extraInstruction?: string,
+  options: { engine?: "auto" | "openai"; claudeModel?: string } = {},
+) {
   const history = await listActiveCoachMessages(user.id, HISTORY_MESSAGES);
   const context = await buildCoachContext(user, now);
   const instructions = [COACH_INSTRUCTIONS, extraInstruction, `# Данные\n${context}`]
     .filter(Boolean)
     .join("\n\n");
+  if (options.engine !== "openai" && isClaudeRelayConfigured()) {
+    try {
+      const answer = await askClaudeRelay({
+        system: instructions,
+        prompt: coachTranscript(history),
+        model: options.claudeModel ?? getEnv().CLAUDE_CHAT_MODEL,
+        effort: "high",
+        timeoutMs: 45_000,
+      });
+      const text = answer.result?.trim();
+      if (text) {
+        await insertCoachMessage({
+          userId: user.id,
+          role: "assistant",
+          content: text,
+          metadata: { engine: "claude", model: answer.model },
+        });
+        return text;
+      }
+    } catch (error) {
+      logger.warn("Coach via Claude failed, using OpenAI", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   const input = history.map((message) => ({
     role: message.role === "assistant" ? ("assistant" as const) : ("user" as const),
     content: message.content,
@@ -211,7 +261,7 @@ export async function generateCoachReply(user: User, now: Date, extraInstruction
   return text;
 }
 
-async function guardDailyLimit(user: User, now: Date) {
+export async function guardCoachDailyLimit(user: User, now: Date) {
   const dayStart = DateTime.fromJSDate(now, { zone: "utc" }).setZone(user.timezone).startOf("day");
   const asked = await countCoachQuestionsSince(user.id, dayStart.toUTC().toJSDate());
   if (asked >= DAILY_QUESTION_LIMIT) {
@@ -221,7 +271,7 @@ async function guardDailyLimit(user: User, now: Date) {
 
 export async function askCoach(params: { user: User; message: string; now?: Date }) {
   const now = params.now ?? new Date();
-  await guardDailyLimit(params.user, now);
+  await guardCoachDailyLimit(params.user, now);
   await insertCoachMessage({ userId: params.user.id, role: "user", content: params.message });
   await generateCoachReply(params.user, now);
   return listCoachConversation(params.user.id);
@@ -235,7 +285,7 @@ export async function uploadRideToCoach(params: {
   now?: Date;
 }) {
   const now = params.now ?? new Date();
-  await guardDailyLimit(params.user, now);
+  await guardCoachDailyLimit(params.user, now);
   const profile = await getCoachProfile(params.user.id);
   const summary = parseFitRide(params.bytes, { ftp: coachFtp(profile?.settings) });
   const startedAt = new Date(summary.startedAt);

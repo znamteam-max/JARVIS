@@ -1,0 +1,25 @@
+name = "jarvis-claude"
+account_id = "f7f0376bf1c44c4e3cef4a24adf1b66a"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+workers_dev = true
+
+# Image is built without Docker (crane: node:22-slim + server.mjs + Claude Code linux binary)
+# and pushed to the Cloudflare registry; see README in this folder.
+[[containers]]
+class_name = "ClaudeRunner"
+image = "registry.cloudflare.com/f7f0376bf1c44c4e3cef4a24adf1b66a/jarvis-claude:2.1.292-1"
+instance_type = "standard-1"
+max_instances = 1
+
+[[durable_objects.bindings]]
+name = "CLAUDE_RUNNER"
+class_name = "ClaudeRunner"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ClaudeRunner"]
+
+# Secrets:
+# - CLAUDE_CODE_OAUTH_TOKEN (owner's `claude setup-token`, valid 1 year)
+# - RELAY_TOKEN (same value as CLAUDE_RELAY_TOKEN on Vercel)
