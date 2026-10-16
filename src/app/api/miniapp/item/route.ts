@@ -10,6 +10,7 @@ import {
   type ItemEditMutation,
 } from "@/services/itemEditMutations";
 import { buildMiniAppSummary } from "@/services/miniappSummary";
+import { deletePlannerItemEverywhere } from "@/services/plannerItemDelete";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -84,5 +85,22 @@ export async function PATCH(request: Request) {
     });
     if (result.item) await syncItemsToCalendarBestEffort([result.item]).catch(() => []);
   }
+  return NextResponse.json({ ok: true, summary: await buildMiniAppSummary(owner) });
+}
+
+// Same as the bot's "Удалить": the item goes with its reminders, rules and calendar copy.
+export async function DELETE(request: Request) {
+  const owner = await resolveMiniAppOwner(request);
+  if (!owner) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  const id = new URL(request.url).searchParams.get("id") ?? "";
+  if (!z.string().uuid().safeParse(id).success) {
+    return NextResponse.json({ ok: false, error: "invalid" }, { status: 400 });
+  }
+  const deleted = await deletePlannerItemEverywhere({
+    userId: owner.id,
+    itemId: id,
+    source: "miniapp_delete",
+  });
+  if (!deleted) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   return NextResponse.json({ ok: true, summary: await buildMiniAppSummary(owner) });
 }

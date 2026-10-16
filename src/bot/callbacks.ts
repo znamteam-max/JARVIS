@@ -103,6 +103,7 @@ import { detectPlanConflicts, formatConflictLine } from "@/services/planConflict
 import { startItemEditSession } from "@/services/itemEditSessions";
 import { startMultiReminderSetupSession } from "@/services/multiReminderSetupSessions";
 import { deleteYandexCalendarObject } from "@/integrations/yandexCalendar";
+import { deletePlannerItemEverywhere } from "@/services/plannerItemDelete";
 import { parseBeforeEventReminderSpecsForAnchor } from "@/domain/beforeEventReminderParsing";
 import {
   isTodayUntilDonePlannerItem,
@@ -1015,18 +1016,12 @@ export function registerCallbacks(bot: Bot<BotContext>) {
       });
       return;
     }
-    const item = await cancelPlannerItem(owner.id, ctx.match[1]);
-    if (item) await cancelItemReminders(owner.id, item.id);
-    if (item) await stopPoliciesForItem(owner.id, item.id);
-    if (item) {
-      await writeAudit({
-        userId: owner.id,
-        action: "assistant.planner_mutation",
-        entityType: "planner_item",
-        entityId: item.id,
-        details: { mutationSource: "user_delete_callback", operation: "cancel" },
-      });
-    }
+    const deleted = await deletePlannerItemEverywhere({
+      userId: owner.id,
+      itemId: ctx.match[1],
+      source: "user_delete_callback",
+    });
+    const item = deleted?.item ?? null;
     await ctx.answerCallbackQuery(item ? "Удалено" : "Не найдено");
     if (!item) await ctx.reply("Не нашёл эту запись.");
     await refreshAfterCallback(ctx, item?.id);

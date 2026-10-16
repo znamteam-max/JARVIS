@@ -75,6 +75,23 @@ export function estimateFoodFromImage(params: {
   });
 }
 
+const TEXT_INSTRUCTIONS = [
+  "Ты нутрициолог. Фото нет: пользователь описал словами, что съел.",
+  "Разбери описание на продукты и оцени вес и КБЖУ каждого.",
+  "Если вес не указан — бери обычную порцию и скажи об этом в note.",
+  "Не изображай точность: калории округляй до 10, граммы до 5.",
+  "Если текст не про еду — isFood=false.",
+  "Названия пиши по-русски, коротко. Ответь только вызовом report_food_estimate.",
+].join("\n");
+
+// For meals that were eaten before anyone thought of a photo.
+export function estimateFoodFromText(params: { text: string }): Promise<FoodEstimationResult> {
+  return callFoodEstimateTool({
+    instructions: TEXT_INSTRUCTIONS,
+    content: [{ type: "input_text", text: `Что съел пользователь: ${params.text}` }],
+  });
+}
+
 const REVISION_INSTRUCTIONS = [
   "Ты нутрициолог. Тебе дана текущая оценка блюда (JSON) и уточнение пользователя.",
   "Исправь оценку: меняй только то, о чём говорит пользователь, остальные продукты оставь как есть.",

@@ -34,6 +34,8 @@ const ERRORS: Record<string, string> = {
     "Не понял напоминание. Напиши, например: «за час и за 15 минут» или «каждый час с 8 до 12».",
   not_found: "Этот пункт уже изменился. Обнови расписание.",
   photo_delete_failed: "Не получилось удалить фото. Попробуй ещё раз.",
+  not_food_text: "Не понял, что за еда. Напиши, например: «гречка с курицей, тарелка».",
+  invalid_time: "Время еды — не позже, чем сейчас, и не раньше, чем неделю назад.",
 };
 
 export function MiniApp() {
@@ -578,6 +580,14 @@ function EditItemForm({
     if (saved) close();
   }
 
+  async function remove() {
+    const question = isEvent
+      ? `Удалить «${item.title}»? Напоминания тоже удалятся, а событие исчезнет из Яндекс.Календаря.`
+      : `Удалить «${item.title}» вместе с напоминаниями?`;
+    if (!(await confirmAction(question))) return;
+    if (await call(`/api/miniapp/item?id=${item.id}`, { method: "DELETE" })) close();
+  }
+
   return (
     <div className={styles.card} style={{ background: "var(--surface2)", marginTop: 8 }}>
       <label className={styles.caption} htmlFor={id("title")}>
@@ -653,9 +663,25 @@ function EditItemForm({
         placeholder="за час и за 15 минут · каждый час с 8 до 12"
         onChange={(event) => setReminders(event.target.value)}
       />
-      <button type="button" className={styles.primary} disabled={busy} onClick={() => void save()}>
-        Сохранить
-      </button>
+      <div className={styles.chips}>
+        <button
+          type="button"
+          className={styles.primary}
+          style={{ flex: 1 }}
+          disabled={busy}
+          onClick={() => void save()}
+        >
+          Сохранить
+        </button>
+        <button
+          type="button"
+          className={styles.secondary}
+          disabled={busy}
+          onClick={() => void remove()}
+        >
+          Удалить
+        </button>
+      </div>
     </div>
   );
 }
@@ -687,6 +713,7 @@ function FoodTab({ summary, busy, call }: { summary: MiniAppSummary; busy: boole
   const [caption, setCaption] = useState("");
   const [pending, setPending] = useState<{ blob: Blob; url: string } | null>(null);
   const [goalsOpen, setGoalsOpen] = useState(false);
+  const [described, setDescribed] = useState<{ text: string; when: string } | null>(null);
   const { food, goals } = summary;
   const maxValue = Math.max(goals.calories * 1.25, ...food.week.map((day) => day.calories), 1);
 
@@ -708,6 +735,17 @@ function FoodTab({ summary, busy, call }: { summary: MiniAppSummary; busy: boole
     form.append("photo", pending.blob, "food.jpg");
     if (caption.trim()) form.append("caption", caption.trim());
     if (await call("/api/miniapp/food", { method: "POST", body: form })) discard();
+  }
+
+  // No photo: describe the meal in words and say when it was eaten.
+  async function logDescribed() {
+    if (!described?.text.trim()) return;
+    const logged = await call("/api/miniapp/food", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: described.text.trim(), eatenAtLocal: described.when }),
+    });
+    if (logged) setDescribed(null);
   }
 
   return (
@@ -789,6 +827,60 @@ function FoodTab({ summary, busy, call }: { summary: MiniAppSummary; busy: boole
         >
           {pending ? "Переснять" : "Сфотографировать еду"}
         </button>
+        {described ? (
+          <>
+            <label className={styles.caption} htmlFor="food-text">
+              Что съел и сколько
+            </label>
+            <textarea
+              id="food-text"
+              className={styles.input}
+              style={{ minHeight: 72, paddingTop: 10 }}
+              value={described.text}
+              placeholder="например: овсянка на молоке ~250 г и банан"
+              onChange={(event) => setDescribed({ ...described, text: event.target.value })}
+            />
+            <label className={styles.caption} htmlFor="food-when">
+              Когда
+            </label>
+            <input
+              id="food-when"
+              className={styles.input}
+              type="datetime-local"
+              value={described.when}
+              max={localNow()}
+              onChange={(event) => setDescribed({ ...described, when: event.target.value })}
+            />
+            <div className={styles.chips}>
+              <button
+                type="button"
+                className={styles.primary}
+                style={{ flex: 1 }}
+                disabled={busy || !described.text.trim()}
+                onClick={() => void logDescribed()}
+              >
+                {busy ? "Считаю…" : "Посчитать"}
+              </button>
+              <button
+                type="button"
+                className={styles.secondary}
+                disabled={busy}
+                onClick={() => setDescribed(null)}
+              >
+                Отмена
+              </button>
+            </div>
+          </>
+        ) : (
+          <button
+            type="button"
+            className={styles.secondary}
+            disabled={busy}
+            onClick={() => setDescribed({ text: "", when: localNow() })}
+          >
+            Записать без фото
+          </button>
+        )}
       </div>
 
       {food.today.map((entry) => (
@@ -1131,6 +1223,13 @@ function FitnessTab({ summary }: { summary: MiniAppSummary }) {
       </section>
     </>
   );
+}
+
+// Device-local "now" in the datetime-local format (yyyy-MM-ddTHH:mm).
+function localNow() {
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
 }
 
 // Phone photos are several MB; a 1280px JPEG is plenty for the estimate and fits the upload limit.
