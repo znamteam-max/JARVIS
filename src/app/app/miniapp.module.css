@@ -42,6 +42,12 @@
   gap: 2px;
 }
 
+.headerActions {
+  display: flex;
+  gap: 8px;
+  flex: none;
+}
+
 .caption {
   font-size: 13px;
   color: var(--muted);
@@ -539,6 +545,13 @@
   font-size: 15px;
   line-height: 1.45;
   min-width: 0;
+}
+
+/* Who answered and when: the model under each JARVIS bubble. */
+.bubbleMeta {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--muted);
 }
 
 .markdown p,

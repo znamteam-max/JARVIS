@@ -10,12 +10,14 @@ import { logger } from "@/lib/logger";
 import {
   buildCoachContext,
   COACH_INSTRUCTIONS,
+  conversationTranscript,
   generateCoachReply,
   guardCoachDailyLimit,
   listCoachConversation,
 } from "@/services/coach";
-import { logFoodFromText } from "@/services/foodLog";
+import { FoodLogError, logFoodFromText } from "@/services/foodLog";
 import {
+  AppCreateError,
   createPlannerItemFromApp,
   logManualWorkout,
   REMINDER_CHOICES,
@@ -24,11 +26,14 @@ import {
 import { buildMiniAppSummary, type MiniAppSummary } from "@/services/miniappSummary";
 import { completePlannerItemFromApp } from "@/services/plannerItemComplete";
 import { deletePlannerItemEverywhere } from "@/services/plannerItemDelete";
-import { editPlannerItemFromApp } from "@/services/plannerItemEdit";
+import { editPlannerItemFromApp, PlannerItemEditError } from "@/services/plannerItemEdit";
 
-const HISTORY_MESSAGES = 16;
+const HISTORY_MESSAGES = 40;
 const MAX_ACTIONS = 5;
-const CHAT_TIMEOUT_MS = 40_000;
+// Opus with effort "high" over the whole context; the chat route allows 120 s.
+const CHAT_TIMEOUT_MS = 100_000;
+// The Telegram shadow runs after the webhook answer, inside its 60 s.
+const SHADOW_TIMEOUT_MS = 50_000;
 
 const ACTION_TYPES = [
   "create_item",
@@ -50,17 +55,19 @@ const SPORTS = [
 ] as const;
 const REMINDERS = Object.keys(REMINDER_CHOICES) as ReminderChoice[];
 
-const OPERATOR_INSTRUCTIONS = `Ты — JARVIS: ещё и ведёшь расписание, еду и тренировки владельца. Ты сам ничего не выполняешь — ты возвращаешь решение (JSON), а приложение выполняет действия из actions.
+const OPERATOR_INSTRUCTIONS = `Ты — JARVIS: ещё и ведёшь расписание, еду и тренировки владельца. Ты возвращаешь решение (JSON), а приложение выполняет действия из actions. Ты можешь менять расписание: если владелец попросил — делай через actions сразу, без подтверждения, и никогда не пиши, что сам расписание не меняешь. Переспрашивай, только если непонятно, что именно сделать.
 
 Если последнее сообщение владельца — просьба что-то сделать, верни нужные actions:
-- create_item: новое дело. kind: task (задача/напоминалка), event (встреча), training (плановая тренировка). date YYYY-MM-DD, time HH:MM (можно null у задачи без срока). duration_minutes — для встреч. reminders — быстрые варианты: at_time (в момент), 15m, 1h, 2h, 1d; сложное («каждый час с 8 до 12», «пока не сделаю») — в reminders_text.
-- update_item: изменить дело из списка «Дела (можно менять)» по item_id: title, start/end (YYYY-MM-DDTHH:MM, для встреч), deadline (для задач) или clear_deadline, reminders_text (новые напоминания заменят старые).
-- delete_item / complete_item: только item_id. Делай это, только если владелец явно назвал дело; если подходит несколько или непонятно какое — actions пустой, переспроси в reply.
+- create_item: новое дело. kind: task — задача, напоминалка и всё, что надо сделать «до такого-то времени»; event — встреча; training — тренировка с конкретным временем начала. date YYYY-MM-DD, time HH:MM: у task это срок, у event и training — начало. duration_minutes — для встреч и тренировок. Тренировка «до 23:00» или «с дедлайном» без времени начала — это task с time = срок.
+  reminders — быстрые варианты: at_time (в момент), 15m, 1h, 2h, 1d; сложное («каждый час с 8 до 12», «пока не сделаю») — в reminders_text. Без напоминаний — reminders: [] и reminders_text: null.
+- update_item: изменить дело из списка «Дела (можно менять)» по item_id: title, start/end (YYYY-MM-DDTHH:MM, для встреч и тренировок), deadline (для задач) или clear_deadline, reminders_text (новые напоминания заменят старые), clear_reminders: true — убрать все напоминания. Если меняется тип дела (тренировка в 23:00 → задача до 23:00) — delete_item старого и create_item нового. «Исправь», «замени» уже созданное — меняй его, а не добавляй второе.
+- delete_item / complete_item: только item_id. Делай это, только если дело явно названо или однозначно следует из разговора; если подходит несколько — actions пустой, переспроси в reply.
 - log_food: food_text — что и сколько съел своими словами; eaten_at — если было не сейчас.
 - log_workout: тренировка, которую не записали часы: sport, duration_minutes, workout_start (если не сейчас), calories и distance_km — если владелец их назвал.
+Значков и цветов у дел нет. Если просят значок — поставь эмодзи в начало названия: 🚴 вело, 🏃 бег, 🏋️ силовая, 🧘 растяжка.
 Даты «завтра», «в пятницу», «21-го» считай от «Сейчас» в его часовом поясе. item_id бери только из списка дел, не выдумывай.
 Если сообщение — вопрос или разговор, actions пустой.
-reply — коротко по-русски: что сделано (или что уточнить), без повторения всех полей. Для вопросов о тренировках отвечай как тренер по правилам выше.`;
+reply — по-русски, коротко. Итог действий («✅ Добавил…», «⚠️ Не получилось…») приложение само напишет перед твоим ответом — по факту выполнения. Поэтому в reply не утверждай, что что-то уже сделано, и не перечисляй поля дела: пиши только то, что важно сверх этого — почему так, совет, вопрос. На вопросы о тренировках отвечай как тренер по правилам выше.`;
 
 const nullableString = { type: ["string", "null"] };
 const DECISION_SCHEMA = {
@@ -86,6 +93,7 @@ const DECISION_SCHEMA = {
           duration_minutes: { type: ["integer", "null"] },
           reminders: { type: ["array", "null"], items: { type: "string", enum: REMINDERS } },
           reminders_text: nullableString,
+          clear_reminders: { type: ["boolean", "null"] },
           start: nullableString,
           end: nullableString,
           deadline: nullableString,
@@ -124,6 +132,7 @@ const actionSchema = z.object({
     .max(5)
     .nullish(),
   reminders_text: z.string().trim().max(300).nullish(),
+  clear_reminders: z.boolean().nullish(),
   start: localDateTime.nullish(),
   end: localDateTime.nullish(),
   deadline: localDateTime.nullish(),
@@ -169,37 +178,52 @@ export function editableItemsBlock(plan: MiniAppSummary["plan"]) {
   ].join("\n");
 }
 
-function transcript(history: CoachMessage[]) {
-  const lines = history.map((message) => {
-    const who =
-      message.metadata?.auto === true
-        ? "Система"
-        : message.role === "assistant"
-          ? "JARVIS"
-          : "Владелец";
-    return `${who}: ${message.content}`;
-  });
-  return `Переписка (последние сообщения):\n\n${lines.join("\n\n")}\n\nОтветь на последнее сообщение владельца.`;
-}
+type ChatHistory = Array<Pick<CoachMessage, "role" | "content" | "createdAt" | "metadata">>;
 
-async function decide(user: User, now: Date, history: CoachMessage[]) {
+// Everything Claude gets for one turn; exported so a dry run can replay a real moment.
+export async function buildJarvisPrompt(user: User, now: Date, history: ChatHistory) {
   const summary = await buildMiniAppSummary(user, now);
   const context = await buildCoachContext(user, now, summary);
-  const system = [
-    COACH_INSTRUCTIONS,
-    OPERATOR_INSTRUCTIONS,
-    `# Данные\n${context}`,
-    editableItemsBlock(summary.plan),
-  ].join("\n\n");
+  return {
+    summary,
+    system: [
+      COACH_INSTRUCTIONS,
+      OPERATOR_INSTRUCTIONS,
+      `# Данные\n${context}`,
+      editableItemsBlock(summary.plan),
+    ].join("\n\n"),
+    prompt: conversationTranscript(history, user.timezone, "JARVIS"),
+    schema: DECISION_SCHEMA as unknown as Record<string, unknown>,
+  };
+}
+
+async function decide(
+  user: User,
+  now: Date,
+  history: ChatHistory,
+  options: { effort: "medium" | "high"; timeoutMs: number },
+) {
+  const { summary, system, prompt, schema } = await buildJarvisPrompt(user, now, history);
+  const started = Date.now();
   const answer = await askClaudeRelay({
     system,
-    prompt: transcript(history),
-    schema: DECISION_SCHEMA as unknown as Record<string, unknown>,
+    prompt,
+    schema,
     model: getEnv().CLAUDE_CHAT_MODEL,
-    effort: "medium",
-    timeoutMs: CHAT_TIMEOUT_MS,
+    effort: options.effort,
+    timeoutMs: options.timeoutMs,
   });
-  return { ...parseJarvisDecision(answer.structured), model: answer.model };
+  const titles = new Map(
+    summary.plan.flatMap((section) =>
+      section.rows.flatMap((row) => (row.item ? [[row.item.id, row.item.title] as const] : [])),
+    ),
+  );
+  return {
+    ...parseJarvisDecision(answer.structured),
+    model: answer.model,
+    durationMs: Date.now() - started,
+    titles,
+  };
 }
 
 function whenLabel(date: Date | null, timezone: string) {
@@ -211,31 +235,48 @@ function whenLabel(date: Date | null, timezone: string) {
     : null;
 }
 
-async function execute(user: User, action: JarvisAction, now: Date): Promise<string> {
+type Outcome = { done?: string; problem?: string };
+
+async function execute(user: User, action: JarvisAction, now: Date): Promise<Outcome> {
   const tz = user.timezone;
   switch (action.type) {
     case "create_item": {
       if (!action.title) throw new Error("нет названия");
       const kind = action.kind ?? "task";
-      const { item } = await createPlannerItemFromApp({
+      const reminders =
+        action.reminders ??
+        (action.date && action.time && !action.reminders_text
+          ? [kind === "task" ? ("at_time" as const) : ("1h" as const)]
+          : []);
+      const { item, extraUnderstood } = await createPlannerItemFromApp({
         user,
         kind,
         title: action.title,
         dateLocal: action.date ?? null,
         timeLocal: action.time ?? null,
         durationMinutes: action.duration_minutes ?? 60,
-        reminders:
-          action.reminders ??
-          (action.date && action.time ? [kind === "task" ? "at_time" : "1h"] : []),
+        reminders,
         remindersText: action.reminders_text ?? null,
         now,
       });
       const when = whenLabel(item.startAt ?? item.dueAt, tz);
-      return `✅ Добавил «${item.title}»${when ? ` — ${when}` : ""}`;
+      const whenText = when ? (item.startAt ? ` — ${when}` : ` — до ${when}`) : "";
+      const remindersText = action.reminders_text
+        ? ""
+        : reminders.length
+          ? ` · 🔔 ${reminders.map((choice) => REMINDER_CHOICES[choice].label).join(", ")}`
+          : " · без напоминаний";
+      return {
+        done: `✅ Добавил «${item.title}»${whenText}${remindersText}`,
+        problem:
+          extraUnderstood === false
+            ? `Не понял напоминания «${action.reminders_text}» — дело добавил без них`
+            : undefined,
+      };
     }
     case "update_item": {
       if (!action.item_id) throw new Error("не указано дело");
-      const { item } = await editPlannerItemFromApp({
+      const edit = {
         user,
         itemId: action.item_id,
         title: action.title,
@@ -243,9 +284,26 @@ async function execute(user: User, action: JarvisAction, now: Date): Promise<str
         endLocal: action.end,
         dueLocal: action.deadline,
         clearDeadline: action.clear_deadline ?? false,
-        remindersText: action.reminders_text,
-      });
-      return `✏️ Изменил «${item.title}»`;
+        clearReminders: action.clear_reminders ?? false,
+      };
+      const cleared = action.clear_reminders ? " · напоминания убрал" : "";
+      try {
+        const { item } = await editPlannerItemFromApp({
+          ...edit,
+          remindersText: action.reminders_text,
+        });
+        return { done: `✏️ Изменил «${item.title}»${cleared}` };
+      } catch (error) {
+        // An unclear reminder must not cancel the rest of the edit.
+        if (!(error instanceof PlannerItemEditError) || error.code !== "reminders_not_understood") {
+          throw error;
+        }
+        const { item, changed } = await editPlannerItemFromApp(edit);
+        return {
+          done: changed ? `✏️ Изменил «${item.title}»${cleared}` : undefined,
+          problem: `Не понял напоминания «${action.reminders_text}» — их не менял`,
+        };
+      }
     }
     case "delete_item": {
       if (!action.item_id) throw new Error("не указано дело");
@@ -254,8 +312,8 @@ async function execute(user: User, action: JarvisAction, now: Date): Promise<str
         itemId: action.item_id,
         source: "jarvis_chat",
       });
-      if (!deleted) throw new Error("дело не найдено");
-      return `🗑 Удалил «${deleted.item.title}»`;
+      if (!deleted) throw new PlannerItemEditError("not_found");
+      return { done: `🗑 Удалил «${deleted.item.title}»` };
     }
     case "complete_item": {
       if (!action.item_id) throw new Error("не указано дело");
@@ -264,19 +322,19 @@ async function execute(user: User, action: JarvisAction, now: Date): Promise<str
         itemId: action.item_id,
         timezone: tz,
       });
-      if (result.outcome === "missing") throw new Error("дело не найдено");
+      if (result.outcome === "missing") throw new PlannerItemEditError("not_found");
       if (result.outcome === "needs_clarification") throw new Error("событие ещё впереди");
-      return `✔️ Отметил «${result.item.title}»`;
+      return { done: `✔️ Отметил «${result.item.title}»` };
     }
     case "log_food": {
-      if (!action.food_text) throw new Error("не понял, что съедено");
+      if (!action.food_text) throw new FoodLogError("not_food_text");
       const { estimate } = await logFoodFromText({
         user,
         text: action.food_text,
         eatenAtLocal: action.eaten_at,
         capability: "food_estimation_jarvis",
       });
-      return `🍽 Записал: ${estimate.title} — ${estimate.calories} ккал`;
+      return { done: `🍽 Записал: ${estimate.title} — ${estimate.calories} ккал` };
     }
     case "log_workout": {
       if (!action.sport || !action.duration_minutes) throw new Error("нужны вид и длительность");
@@ -291,9 +349,49 @@ async function execute(user: User, action: JarvisAction, now: Date): Promise<str
         calories: action.calories ?? null,
         distanceKm: action.distance_km ?? null,
       });
-      return `🏋️ Записал: ${logged.label}, ${action.duration_minutes} мин, ${logged.estimated ? "≈ " : ""}${logged.calories} ккал`;
+      return {
+        done: `🏋️ Записал: ${logged.label}, ${action.duration_minutes} мин, ${logged.estimated ? "≈ " : ""}${logged.calories} ккал`,
+      };
     }
   }
+}
+
+const VERBS: Record<JarvisAction["type"], string> = {
+  create_item: "добавить",
+  update_item: "изменить",
+  delete_item: "удалить",
+  complete_item: "отметить",
+  log_food: "записать еду",
+  log_workout: "записать тренировку",
+};
+
+const REASONS: Record<string, string> = {
+  not_found: "не нашёл это дело — возможно, оно уже удалено или выполнено",
+  reminders_not_understood: "не понял напоминания",
+  time_required: "для встречи или тренировки нужно время начала",
+  invalid_time: "не понял дату или время",
+  not_food_text: "не понял, что съедено",
+};
+
+// What the owner reads when an action fails: plain words, not an internal code.
+export function failureLine(action: JarvisAction, error: unknown, title?: string) {
+  const code =
+    error instanceof PlannerItemEditError ||
+    error instanceof AppCreateError ||
+    error instanceof FoodLogError
+      ? error.code
+      : null;
+  const reason =
+    (code && REASONS[code]) ?? (error instanceof Error ? error.message : String(error));
+  const name = action.title ?? title;
+  return `⚠️ Не получилось ${VERBS[action.type]}${name ? ` «${name}»` : ""}: ${reason}`;
+}
+
+// The visible answer: what really happened first, then the model's words. The model
+// writes its reply before anything runs, so it must never be the only report.
+export function composeJarvisAnswer(params: { reply: string; done: string[]; failed: string[] }) {
+  const status = [...params.done, ...params.failed].join("\n");
+  return [status, params.reply].filter(Boolean).join("\n\n") || "Готово.";
 }
 
 const FALLBACK_NOTE =
@@ -313,34 +411,54 @@ export async function askJarvis(params: { user: User; message: string; now?: Dat
   let changed = false;
   try {
     const history = await listActiveCoachMessages(user.id, HISTORY_MESSAGES);
-    const decision = await decide(user, now, history);
+    const decision = await decide(user, now, history, {
+      effort: "high",
+      timeoutMs: CHAT_TIMEOUT_MS,
+    });
     const done: string[] = [];
     const failed: string[] = [];
     for (const action of decision.actions) {
       try {
-        done.push(await execute(user, action, now));
-        changed = true;
+        const outcome = await execute(user, action, now);
+        if (outcome.done) {
+          done.push(outcome.done);
+          changed = true;
+        }
+        if (outcome.problem) failed.push(`⚠️ ${outcome.problem}`);
       } catch (error) {
         failed.push(
-          `⚠️ Не получилось (${action.type}): ${error instanceof Error ? error.message : String(error)}`,
+          failureLine(
+            action,
+            error,
+            action.item_id ? decision.titles.get(action.item_id) : undefined,
+          ),
         );
       }
     }
-    if (decision.invalid) failed.push("⚠️ Часть просьбы не разобрал — уточни, пожалуйста.");
-    const content =
-      [decision.reply, failed.length ? failed.join("\n") : null].filter(Boolean).join("\n\n") ||
-      "Готово.";
+    if (decision.invalid) failed.push("⚠️ Часть просьбы не разобрал — переформулируй, пожалуйста.");
     await insertCoachMessage({
       userId: user.id,
       role: "assistant",
-      content,
-      metadata: { engine: "claude", model: decision.model, done, failed },
+      content: composeJarvisAnswer({ reply: decision.reply, done, failed }),
+      metadata: {
+        engine: "claude",
+        model: decision.model,
+        durationMs: decision.durationMs,
+        done,
+        failed,
+      },
     });
     await writeAudit({
       userId: user.id,
       action: "assistant.jarvis_turn",
       entityType: "coach",
-      details: { model: decision.model, actions: decision.actions, done, failed },
+      details: {
+        model: decision.model,
+        durationMs: decision.durationMs,
+        actions: decision.actions,
+        done,
+        failed,
+      },
     }).catch(() => undefined);
   } catch (error) {
     logger.warn("JARVIS via Claude failed, answering with the fallback", {
@@ -355,8 +473,11 @@ export async function askJarvis(params: { user: User; message: string; now?: Dat
 export async function shadowJarvisDecision(user: User, text: string, now = new Date()) {
   if (!isClaudeRelayConfigured()) return;
   try {
-    const history = [{ role: "user", content: text, metadata: {} } as unknown as CoachMessage];
-    const decision = await decide(user, now, history);
+    const history = [{ role: "user", content: text, createdAt: now, metadata: {} }];
+    const decision = await decide(user, now, history, {
+      effort: "medium",
+      timeoutMs: SHADOW_TIMEOUT_MS,
+    });
     await writeAudit({
       userId: user.id,
       action: "assistant.jarvis_shadow",
@@ -367,6 +488,7 @@ export async function shadowJarvisDecision(user: User, text: string, now = new D
         actions: decision.actions,
         invalid: decision.invalid,
         model: decision.model,
+        durationMs: decision.durationMs,
       },
     });
   } catch (error) {

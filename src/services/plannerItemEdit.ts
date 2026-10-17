@@ -1,4 +1,6 @@
 import { getPlannerItemById } from "@/db/queries/items";
+import { stopPoliciesForItem } from "@/db/queries/reminderPolicies";
+import { cancelItemReminders } from "@/db/queries/reminders";
 import type { User } from "@/db/schema";
 import { syncItemsToCalendarBestEffort } from "@/services/calendarBestEffort";
 import {
@@ -24,10 +26,16 @@ export async function editPlannerItemFromApp(params: {
   dueLocal?: string | null;
   clearDeadline?: boolean;
   remindersText?: string | null;
+  // "Без напоминаний": every reminder of the item stops, same as the bot's own button.
+  clearReminders?: boolean;
 }) {
   const { user } = params;
   const item = await getPlannerItemById(user.id, params.itemId);
   if (!item || item.status !== "active") throw new PlannerItemEditError("not_found");
+  if (params.clearReminders) {
+    await cancelItemReminders(user.id, item.id);
+    await stopPoliciesForItem(user.id, item.id);
+  }
 
   const mutation: ItemEditMutation = {
     itemId: item.id,
@@ -53,7 +61,7 @@ export async function editPlannerItemFromApp(params: {
     mutation.deadlineAtLocal = `${params.dueLocal}:00`;
     mutation.changedFields.push("deadline");
   }
-  if (params.remindersText?.trim()) {
+  if (params.remindersText?.trim() && !params.clearReminders) {
     const parsed = parseItemEditMutation({
       text: params.remindersText,
       item,
@@ -68,7 +76,7 @@ export async function editPlannerItemFromApp(params: {
     mutation.changedFields.push("reminder_policy");
   }
 
-  if (!mutation.changedFields.length) return { item, changed: false };
+  if (!mutation.changedFields.length) return { item, changed: Boolean(params.clearReminders) };
   const result = await applyItemEditMutation({
     userId: user.id,
     item,

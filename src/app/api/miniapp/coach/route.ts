@@ -11,7 +11,7 @@ import { askJarvis } from "@/services/jarvisAgent";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 // The coach reads a long context; give the model time to answer.
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 const MAX_FIT_BYTES = 8 * 1024 * 1024;
 const messageSchema = z.object({ message: z.string().trim().min(1).max(2000) });

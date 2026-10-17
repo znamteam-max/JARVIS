@@ -209,7 +209,11 @@ export function MiniApp() {
         {summary && tab === "plan" ? <PlanTab summary={summary} call={call} busy={busy} /> : null}
         {summary && tab === "food" ? <FoodTab summary={summary} busy={busy} call={call} /> : null}
         {summary && tab === "coach" ? (
-          <CoachTab api={api} refresh={() => void call("/api/miniapp/summary")} />
+          <CoachTab
+            api={api}
+            mode={mode ?? "browser"}
+            refresh={() => void call("/api/miniapp/summary")}
+          />
         ) : null}
         {summary && tab === "fitness" ? (
           <FitnessTab summary={summary} call={call} busy={busy} />
@@ -2005,8 +2009,20 @@ type CoachMessageView = {
   content: string;
   createdAt: string;
   auto?: boolean;
+  model?: string | null;
 };
 type Api = (path: string, init?: RequestInit) => Promise<Record<string, unknown> | null>;
+
+function chatTime(iso: string) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  const sameDay = date.toDateString() === new Date().toDateString();
+  return date.toLocaleString("ru-RU", {
+    hour: "2-digit",
+    minute: "2-digit",
+    ...(sameDay ? {} : { day: "numeric", month: "short" }),
+  });
+}
 
 const COACH_PROMPTS = [
   "Что у меня сегодня?",
@@ -2017,11 +2033,12 @@ const COACH_PROMPTS = [
 
 // Chat with the AI coach: it sees rides (with power from FIT files), watch data, sleep,
 // the schedule and today's food. 📎 sends a FIT export for a review.
-function CoachTab({ api, refresh }: { api: Api; refresh: () => void }) {
+function CoachTab({ api, mode, refresh }: { api: Api; mode: Mode; refresh: () => void }) {
   const [messages, setMessages] = useState<CoachMessageView[] | null>(null);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [exportNote, setExportNote] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
@@ -2084,6 +2101,33 @@ function CoachTab({ api, refresh }: { api: Api; refresh: () => void }) {
     if (body?.ok) setMessages([]);
   }
 
+  // The whole chat as a .md file: downloaded in a browser, sent by the bot inside
+  // Telegram (its web view cannot save files).
+  async function exportHistory() {
+    setExportNote("Готовлю файл…");
+    if (mode === "browser") {
+      const response = await fetch("/api/miniapp/coach/export").catch(() => null);
+      if (response?.ok) {
+        const url = URL.createObjectURL(await response.blob());
+        const link = document.createElement("a");
+        link.href = url;
+        link.download =
+          /filename="([^"]+)"/.exec(response.headers.get("content-disposition") ?? "")?.[1] ??
+          "jarvis-chat.md";
+        link.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+        setExportNote("Файл с историей скачан.");
+        return;
+      }
+    }
+    const body = await api("/api/miniapp/coach/export", { method: "POST" });
+    setExportNote(
+      body?.ok
+        ? "Отправил файл с историей в чат с ботом в Telegram."
+        : "Не получилось выгрузить историю. Попробуй ещё раз.",
+    );
+  }
+
   return (
     <>
       <div className={styles.header}>
@@ -2091,12 +2135,23 @@ function CoachTab({ api, refresh }: { api: Api; refresh: () => void }) {
           <span className={styles.caption}>дела, еда, тренировки — пиши как человеку</span>
           <h1 className={styles.title}>JARVIS</h1>
         </div>
-        {messages?.length ? (
-          <button type="button" className={styles.secondary} onClick={() => void reset()}>
-            Новый разговор
+        <div className={styles.headerActions}>
+          <button
+            type="button"
+            className={styles.secondary}
+            aria-label="Выгрузить историю чата файлом"
+            onClick={() => void exportHistory()}
+          >
+            История
           </button>
-        ) : null}
+          {messages?.length ? (
+            <button type="button" className={styles.secondary} onClick={() => void reset()}>
+              Новый
+            </button>
+          ) : null}
+        </div>
       </div>
+      {exportNote ? <span className={styles.caption}>{exportNote}</span> : null}
       {messages === null ? <span className={styles.caption}>Загружаю…</span> : null}
       {messages?.length === 0 && !sending ? (
         <div className={styles.card}>
@@ -2119,6 +2174,13 @@ function CoachTab({ api, refresh }: { api: Api; refresh: () => void }) {
               className={message.role === "user" ? styles.bubbleUser : styles.bubbleCoach}
             >
               {message.role === "user" ? message.content : <Markdown text={message.content} />}
+              {message.role === "assistant" ? (
+                <div className={styles.bubbleMeta}>
+                  {[message.model ?? "модель не записана", chatTime(message.createdAt)]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </div>
+              ) : null}
             </div>
           ),
         )}

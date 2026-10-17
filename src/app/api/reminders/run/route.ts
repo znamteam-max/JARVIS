@@ -12,7 +12,7 @@ import { constantTimeEquals } from "@/lib/secrets";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 // The coach's workout review runs after the response and may take ~30 s.
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 export async function POST(request: Request) {
   const expected = `Bearer ${requireEnv("CRON_SECRET")}`;

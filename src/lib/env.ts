@@ -41,7 +41,7 @@ const envSchema = z.object({
   // Claude Code on the owner's Max subscription in a Cloudflare container.
   CLAUDE_RELAY_URL: z.string().url().optional(),
   CLAUDE_RELAY_TOKEN: z.string().optional(),
-  CLAUDE_CHAT_MODEL: z.string().default("sonnet"),
+  CLAUDE_CHAT_MODEL: z.string().default("opus"),
   CLAUDE_REVIEW_MODEL: z.string().default("opus"),
   MEDIA_WORKER_URL: z.string().url().optional(),
   MEDIA_WORKER_TOKEN: z.string().optional(),

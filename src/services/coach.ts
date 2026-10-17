@@ -6,6 +6,7 @@ import { writeAudit } from "@/db/queries/audit";
 import {
   countCoachQuestionsSince,
   getCoachProfile,
+  getLatestCoachReview,
   insertCoachMessage,
   listActiveCoachMessages,
   listRideFilesSince,
@@ -14,6 +15,8 @@ import {
 import { listFitnessActivitiesSince, listWellnessDaysSince } from "@/db/queries/fitness";
 import type { CoachMessage, User } from "@/db/schema";
 import { activityWatts, withoutWatchDuplicates } from "@/domain/activityDedupe";
+import { chatModelLabel } from "@/domain/chatModelLabel";
+import { recentLoadBlock } from "@/domain/recentLoad";
 import { formatRideForCoach, type RideSummary } from "@/domain/rideAnalysis";
 import { sportLabel } from "@/domain/stravaActivity";
 import { parseFitRide } from "@/integrations/fitFile";
@@ -22,8 +25,10 @@ import { UserFacingError } from "@/lib/errors";
 import { logger } from "@/lib/logger";
 import { buildMiniAppSummary, type MiniAppSummary } from "@/services/miniappSummary";
 
-const HISTORY_MESSAGES = 16;
+const HISTORY_MESSAGES = 40;
 const DAILY_QUESTION_LIMIT = 60;
+const CLAUDE_TIMEOUT_MS = 90_000;
+const REVIEW_IN_CONTEXT_CHARS = 1800;
 const DEFAULT_FTP = 300;
 
 export const COACH_INSTRUCTIONS = `Ты — личный тренер владельца приложения JARVIS по велоспорту и выносливости, и заодно помощник по его дню. Отвечай по-русски.
@@ -36,9 +41,18 @@ export const COACH_INSTRUCTIONS = `Ты — личный тренер владе
 - «Все тренировки» (Intervals.icu): поездки Zwift — с мощностью; записи часов Garmin — только время и пульс. Записи часов, которые дублируют поездку Zwift по времени, уже убраны. Если в то же время есть и строка там, и заезд с мощностью — это одна и та же тренировка.
 - Сон, HRV и пульс покоя, расписание дня и питание за сегодня.
 
+- «Нагрузка последних дней» — тренировки по дням и сколько часов прошло с конца последней. Заезды с перерывом до 30 минут — это одна тренировка: считай их вместе (36 + 85 мин подряд — это одна двухчасовая).
+- «Последний разбор» — что ты сам советовал после последней тренировки.
+
 Учитывай восстановление (сон, HRV, пульс покоя), жару и охлаждение, болезнь, силовые, расписание и питание.
+Прежде чем советовать, что делать сегодня или завтра, сверься с «Нагрузкой последних дней» и «Последним разбором». Не противоречь своему разбору и недавним ответам без новой причины; если меняешь совет — скажи, что изменилось. Длинную или тяжёлую тренировку на следующий день после длинной или тяжёлой ставь, только если так задумано в плане владельца.
+У каждого сообщения переписки есть время — по нему понимай, что было сегодня, вчера, несколько часов назад.
 Когда спрашивают, что делать сегодня — предложи одну конкретную тренировку: длительность, структура, ватты, каденс, охлаждение и питание до/во время/после — и в 1–2 строках почему. Если по данным лучше отдых — скажи прямо.
-Не выдумывай тренировок, которых нет в данных. Каждое число в ответе (ватты, пульс, проценты, время в зонах) бери из данных ниже или прямо считай из них; если нужного числа в данных нет — не пиши его и не оценивай «на глаз». NP — это не максимум; максимумы и лучшие отрезки бери из строки «лучшие». Ты только советуешь: сам ничего не меняешь в расписании.`;
+Не выдумывай тренировок, которых нет в данных. Каждое число в ответе (ватты, пульс, проценты, время в зонах) бери из данных ниже или прямо считай из них; если нужного числа в данных нет — не пиши его и не оценивай «на глаз». NP — это не максимум; максимумы и лучшие отрезки бери из строки «лучшие».`;
+
+// Reviews and FIT uploads only answer; changes go through the JARVIS chat.
+const ADVICE_ONLY_NOTE =
+  "В этом ответе ты ничего не меняешь в расписании. Если советуешь что-то поставить или перенести — предложи владельцу попросить об этом в чате одной фразой.";
 
 export type CoachMessageView = {
   id: string;
@@ -46,6 +60,8 @@ export type CoachMessageView = {
   content: string;
   createdAt: string;
   auto: boolean;
+  // "Claude Opus 5.5", "GPT-4.1 (запасной)": who answered, shown under the bubble.
+  model: string | null;
 };
 
 function view(row: {
@@ -61,6 +77,7 @@ function view(row: {
     content: row.content,
     createdAt: row.createdAt.toISOString(),
     auto: row.metadata?.auto === true,
+    model: row.role === "assistant" ? chatModelLabel(row.metadata) : null,
   } satisfies CoachMessageView;
 }
 
@@ -87,37 +104,49 @@ export async function buildCoachContext(
       .setZone(tz)
       .setLocale("ru")
       .toFormat("ccc dd.LL HH:mm");
-  const [profile, rides, activities, wellness, summary] = await Promise.all([
+  const [profile, rides, activities, wellness, summary, review] = await Promise.all([
     getCoachProfile(user.id),
     listRideFilesSince(user.id, local.minus({ days: 42 }).toJSDate()),
     listFitnessActivitiesSince(user.id, local.minus({ days: 21 }).toJSDate()),
     listWellnessDaysSince(user.id, local.minus({ days: 14 }).toISODate() ?? ""),
     preparedSummary ?? buildMiniAppSummary(user, now),
+    getLatestCoachReview(user.id),
   ]);
   const settings = profile?.settings ?? {};
 
   const rideLines = rides.map((ride) =>
     formatRideForCoach(ride.summary as unknown as RideSummary, label(ride.startedAt)),
   );
-  const activityLines = withoutWatchDuplicates(activities)
-    .sort((a, b) => a.startAt.getTime() - b.startAt.getTime())
-    .map((activity) => {
-      const raw = (activity.raw ?? {}) as Record<string, unknown>;
-      const watts = activityWatts(activity);
-      return [
-        `${label(activity.startAt)} ${sportLabel(activity.sportType)} «${activity.name}»`,
-        `${Math.round(activity.movingTimeS / 60)} мин`,
-        watts ? `avg ${watts} Вт, NP ${raw.icu_weighted_avg_watts ?? "?"}` : null,
-        activity.averageHeartrate
-          ? `пульс ${activity.averageHeartrate}/${activity.maxHeartrate}`
-          : null,
-        typeof raw.icu_training_load === "number" ? `нагрузка ${raw.icu_training_load}` : null,
-        activity.calories ? `${activity.calories} ккал` : null,
-        activity.source === "manual" ? "(добавлена вручную)" : null,
-      ]
-        .filter(Boolean)
-        .join(", ");
-    });
+  const workouts = withoutWatchDuplicates(activities).sort(
+    (a, b) => a.startAt.getTime() - b.startAt.getTime(),
+  );
+  const reviewFresh =
+    review && now.getTime() - review.createdAt.getTime() < 7 * 24 * 60 * 60 * 1000;
+  const reviewBlock = reviewFresh
+    ? [
+        `## Последний разбор (${label(review.createdAt)}, ${chatModelLabel(review.metadata) ?? "тренер"})`,
+        review.content.length > REVIEW_IN_CONTEXT_CHARS
+          ? `${review.content.slice(0, REVIEW_IN_CONTEXT_CHARS)}…`
+          : review.content,
+      ].join("\n")
+    : "## Последний разбор\nЗа неделю разборов не было.";
+  const activityLines = workouts.map((activity) => {
+    const raw = (activity.raw ?? {}) as Record<string, unknown>;
+    const watts = activityWatts(activity);
+    return [
+      `${label(activity.startAt)} ${sportLabel(activity.sportType)} «${activity.name}»`,
+      `${Math.round(activity.movingTimeS / 60)} мин`,
+      watts ? `avg ${watts} Вт, NP ${raw.icu_weighted_avg_watts ?? "?"}` : null,
+      activity.averageHeartrate
+        ? `пульс ${activity.averageHeartrate}/${activity.maxHeartrate}`
+        : null,
+      typeof raw.icu_training_load === "number" ? `нагрузка ${raw.icu_training_load}` : null,
+      activity.calories ? `${activity.calories} ккал` : null,
+      activity.source === "manual" ? "(добавлена вручную)" : null,
+    ]
+      .filter(Boolean)
+      .join(", ");
+  });
   const wellnessLines = [...wellness]
     .sort((a, b) => a.day.localeCompare(b.day))
     .map((day) =>
@@ -145,6 +174,10 @@ export async function buildCoachContext(
     `Сейчас: ${local.toFormat("cccc, d MMMM yyyy, HH:mm")} (${tz}).`,
     `Настройки: FTP ${coachFtp(settings)} Вт${settings.hrMax ? `, HRmax ${settings.hrMax}` : ""}${settings.weightKg ? `, вес ~${settings.weightKg} кг` : ""}.`,
     "",
+    recentLoadBlock({ activities: workouts, now, timezone: tz }),
+    "",
+    reviewBlock,
+    "",
     "## Профиль и история (от владельца)",
     profile?.profile ?? "Профиль ещё не заполнен.",
     "",
@@ -164,18 +197,28 @@ export async function buildCoachContext(
   ].join("\n");
 }
 
-// Answers the latest message in the thread, stores the answer and returns its text.
-function coachTranscript(history: CoachMessage[]) {
+// The thread as the model reads it: each message with its local time and author, so
+// "9 часов назад" and "вчера ты советовал отдых" are visible in the text itself.
+export function conversationTranscript(
+  history: Array<Pick<CoachMessage, "role" | "content" | "createdAt" | "metadata">>,
+  timezone: string,
+  assistantName: string,
+) {
   const lines = history.map((message) => {
+    const when = DateTime.fromJSDate(message.createdAt ?? new Date(), { zone: "utc" })
+      .setZone(timezone)
+      .setLocale("ru")
+      .toFormat("ccc dd.LL HH:mm");
+    const model = message.role === "assistant" ? chatModelLabel(message.metadata) : null;
     const who =
       message.metadata?.auto === true
         ? "Система"
         : message.role === "assistant"
-          ? "Тренер"
+          ? `${assistantName}${model ? ` (${model})` : ""}`
           : "Владелец";
-    return `${who}: ${message.content}`;
+    return `[${when}] ${who}: ${message.content}`;
   });
-  return `Переписка (последние сообщения):\n\n${lines.join("\n\n")}\n\nОтветь на последнее сообщение.`;
+  return `Переписка (последние сообщения, время местное):\n\n${lines.join("\n\n")}\n\nОтветь на последнее сообщение.`;
 }
 
 // Claude (owner's subscription, via the Cloudflare relay) answers first; OpenAI steps in
@@ -184,21 +227,31 @@ export async function generateCoachReply(
   user: User,
   now: Date,
   extraInstruction?: string,
-  options: { engine?: "auto" | "openai"; claudeModel?: string } = {},
+  options: {
+    engine?: "auto" | "openai";
+    claudeModel?: string;
+    metadata?: Record<string, unknown>;
+  } = {},
 ) {
   const history = await listActiveCoachMessages(user.id, HISTORY_MESSAGES);
   const context = await buildCoachContext(user, now);
-  const instructions = [COACH_INSTRUCTIONS, extraInstruction, `# Данные\n${context}`]
+  const instructions = [
+    COACH_INSTRUCTIONS,
+    options.engine === "openai" ? null : ADVICE_ONLY_NOTE,
+    extraInstruction,
+    `# Данные\n${context}`,
+  ]
     .filter(Boolean)
     .join("\n\n");
+  const transcript = conversationTranscript(history, user.timezone, "Тренер");
   if (options.engine !== "openai" && isClaudeRelayConfigured()) {
     try {
       const answer = await askClaudeRelay({
         system: instructions,
-        prompt: coachTranscript(history),
+        prompt: transcript,
         model: options.claudeModel ?? getEnv().CLAUDE_CHAT_MODEL,
         effort: "high",
-        timeoutMs: 45_000,
+        timeoutMs: CLAUDE_TIMEOUT_MS,
       });
       const text = answer.result?.trim();
       if (text) {
@@ -206,7 +259,7 @@ export async function generateCoachReply(
           userId: user.id,
           role: "assistant",
           content: text,
-          metadata: { engine: "claude", model: answer.model },
+          metadata: { ...options.metadata, engine: "claude", model: answer.model },
         });
         return text;
       }
@@ -216,12 +269,13 @@ export async function generateCoachReply(
       });
     }
   }
-  const input = history.map((message) => ({
-    role: message.role === "assistant" ? ("assistant" as const) : ("user" as const),
-    content: message.content,
-  }));
   const ask = (model: string) =>
-    getOpenAIClient().responses.create({ model, instructions, input, max_output_tokens: 2000 });
+    getOpenAIClient().responses.create({
+      model,
+      instructions,
+      input: transcript,
+      max_output_tokens: 2000,
+    });
 
   const primary = getEnv().COACH_MODEL;
   let model = primary;
@@ -256,7 +310,13 @@ export async function generateCoachReply(
     userId: user.id,
     role: "assistant",
     content: text,
-    metadata: { model: response.model ?? model },
+    // With the relay set up, OpenAI answering means Claude was down: the bubble says so.
+    metadata: {
+      ...options.metadata,
+      engine: "openai",
+      model: response.model ?? model,
+      fallback: isClaudeRelayConfigured(),
+    },
   });
   return text;
 }

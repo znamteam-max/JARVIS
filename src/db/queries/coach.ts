@@ -47,6 +47,39 @@ export async function insertCoachMessage(params: {
   return row;
 }
 
+// The whole chat for the export, archived threads included, oldest first.
+export async function listAllCoachMessages(userId: string) {
+  return getDb()
+    .select()
+    .from(coachMessages)
+    .where(eq(coachMessages.userId, userId))
+    .orderBy(asc(coachMessages.createdAt));
+}
+
+// The coach's answer to the latest "🔔 Новые тренировки", even after "Новый разговор".
+export async function getLatestCoachReview(userId: string) {
+  const [trigger] = await getDb()
+    .select({ createdAt: coachMessages.createdAt })
+    .from(coachMessages)
+    .where(and(eq(coachMessages.userId, userId), sql`${coachMessages.metadata}->>'auto' = 'true'`))
+    .orderBy(desc(coachMessages.createdAt))
+    .limit(1);
+  if (!trigger) return null;
+  const [review] = await getDb()
+    .select()
+    .from(coachMessages)
+    .where(
+      and(
+        eq(coachMessages.userId, userId),
+        eq(coachMessages.role, "assistant"),
+        gte(coachMessages.createdAt, trigger.createdAt),
+      ),
+    )
+    .orderBy(asc(coachMessages.createdAt))
+    .limit(1);
+  return review ?? null;
+}
+
 export async function archiveCoachConversation(userId: string) {
   await getDb()
     .update(coachMessages)
