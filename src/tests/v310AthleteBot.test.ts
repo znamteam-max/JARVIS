@@ -5,6 +5,7 @@ import { athleteWebhookSecret } from "@/athleteBot/telegram";
 import { formatDistanceAndPace } from "@/domain/stravaActivity";
 import { markdownToTelegramChunks, telegramHtmlToPlain } from "@/domain/telegramHtml";
 import { athleteFtp, isAthlete, TRIATHLON_COACH_INSTRUCTIONS } from "@/services/coach";
+import { FIRST_CONTACT_INSTRUCTION } from "@/services/coachReviews";
 
 describe("coach answers in Telegram", () => {
   it("turns tables into aligned monospace and keeps bold", () => {
@@ -63,9 +64,11 @@ describe("connecting Intervals.icu", () => {
 });
 
 describe("the athlete's coach", () => {
-  it("is a triathlon coach that asks for the profile", () => {
+  it("is a tactful triathlon coach that never pushes forms or commands", () => {
     expect(TRIATHLON_COACH_INSTRUCTIONS).toContain("70.3");
-    expect(TRIATHLON_COACH_INSTRUCTIONS).toContain("/profile");
+    expect(TRIATHLON_COACH_INSTRUCTIONS).toContain("не упоминай команды");
+    expect(TRIATHLON_COACH_INSTRUCTIONS).toContain("Не больше одного вопроса");
+    expect(FIRST_CONTACT_INSTRUCTION).toContain("планах на ближайший год");
     expect(isAthlete({ role: "athlete" })).toBe(true);
     expect(isAthlete({ role: "owner" })).toBe(false);
   });

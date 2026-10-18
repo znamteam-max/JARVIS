@@ -5,7 +5,12 @@ import { canUseOpenAI } from "@/ai/openaiClient";
 import { getBot } from "@/bot/createBot";
 import { sendAthleteMarkdown, isAthleteBotConfigured } from "@/athleteBot/telegram";
 import { listConnectedAthletes } from "@/db/queries/athletes";
-import { getCoachProfile, insertCoachMessage, upsertRideFile } from "@/db/queries/coach";
+import {
+  getCoachProfile,
+  insertCoachMessage,
+  listActiveCoachMessages,
+  upsertRideFile,
+} from "@/db/queries/coach";
 import { claimActivitiesForCoach, listActivitiesAwaitingCoach } from "@/db/queries/fitness";
 import { getUserByTelegramId } from "@/db/queries/users";
 import type { FitnessActivity, User } from "@/db/schema";
@@ -29,6 +34,9 @@ const QUIET_AFTER_LAST_END_MS = 15 * 60 * 1000;
 
 const AUTO_REVIEW_INSTRUCTION = `Сейчас — автоматический разбор тренировок, которые только что пришли (последнее сообщение с 🔔, его прислала система, а не владелец).
 Первая строка — главный вывод одной фразой, без заголовка. Дальше: цифры (таблица, если отрезков или тренировок несколько), сравнение с похожими прошлыми тренировками, что получилось и что нет, и что это значит для завтра и для плана. Если тренировки шли подряд с коротким перерывом — разбирай их как одну сессию. Коротко.`;
+
+// Someone who did not ask for an AI coach: greet briefly, be useful, ask one easy question.
+export const FIRST_CONTACT_INSTRUCTION = `Это твоё первое сообщение спортсменке. Начни с одной короткой фразы-приветствия, без рассказа о себе, о боте и об ИИ. Потом коротко и по делу разбери эту тренировку. В конце — один спокойный вопрос о планах на ближайший год: какие старты хочется (выбран ли уже старт половинки Айронмена и его дата) и что для неё сейчас главное. Добавь, что ответить можно когда удобно, хоть одной строкой, — а разборы будут приходить и без этого.`;
 
 function activityEnd(activity: FitnessActivity) {
   return activity.startAt.getTime() + Math.max(activity.elapsedTimeS, activity.movingTimeS) * 1000;
@@ -161,6 +169,8 @@ async function reviewForUser(params: {
   }
 
   const lines = activities.map((activity) => describe(activity, owner.timezone));
+  // The very first message an athlete gets from the coach is also the introduction.
+  const firstContact = isAthlete(owner) && !(await listActiveCoachMessages(owner.id, 1)).length;
   await insertCoachMessage({
     userId: owner.id,
     role: "user",
@@ -168,12 +178,21 @@ async function reviewForUser(params: {
     metadata: { auto: true, activityIds: activities.map((activity) => activity.id) },
   });
   try {
-    const review = await generateCoachReply(owner, now, AUTO_REVIEW_INSTRUCTION, {
-      claudeModel: getEnv().CLAUDE_REVIEW_MODEL,
-    });
+    const review = await generateCoachReply(
+      owner,
+      now,
+      firstContact
+        ? `${AUTO_REVIEW_INSTRUCTION}\n\n${FIRST_CONTACT_INSTRUCTION}`
+        : AUTO_REVIEW_INSTRUCTION,
+      { claudeModel: getEnv().CLAUDE_REVIEW_MODEL },
+    );
     // The owner reads the full review in the app; an athlete has only the bot chat.
     await notify(
-      isAthlete(owner) ? `🏋️ **Разбор тренировки**\n\n${review}` : coachNotificationExcerpt(review),
+      isAthlete(owner)
+        ? firstContact
+          ? review
+          : `🏋️ **Разбор тренировки**\n\n${review}`
+        : coachNotificationExcerpt(review),
     );
   } catch (error) {
     logger.warn("Automatic coach review failed", {
