@@ -55,7 +55,7 @@ export const PROFILE_TEMPLATE = `Напиши /profile и дальше одни�
 
 // "/intervals i123456 KEY" → { athleteId, apiKey }; anything else → null.
 export function parseIntervalsCommand(text: string) {
-  const match = /^\/intervals(?:@\w+)?\s+(i?\d{2,12})\s+([A-Za-z0-9_-]{8,128})\s*$/i.exec(
+  const match = /^\/intervals(?:@\w+)?\s+(i?\d{2,12})[\s,;:]+([A-Za-z0-9_-]{8,128})\s*$/i.exec(
     text.trim(),
   );
   if (!match) return null;
@@ -63,6 +63,51 @@ export function parseIntervalsCommand(text: string) {
     ? match[1].toLowerCase()
     : `i${match[1]}`;
   return { athleteId, apiKey: match[2] };
+}
+
+// Every reading of the command worth trying against Intervals.icu. Pasted without spaces
+// ("/intervalsi123456abc…") the end of the id is unknown — the key may start with digits —
+// so each split is a candidate, longest id first; only the right one is accepted.
+export function intervalsCandidates(text: string) {
+  const spaced = parseIntervalsCommand(text);
+  if (spaced) return [spaced];
+  const body = text
+    .trim()
+    .replace(/^\/intervals(?:@\w+)?/i, "")
+    .replace(/[\s,;:]+/g, "");
+  const glued = /^i?(\d{3,})([A-Za-z0-9_-]+)$/i.exec(body);
+  if (!glued) return [];
+  const [, digits, rest] = glued;
+  const candidates: Array<{ athleteId: string; apiKey: string }> = [];
+  for (let length = digits.length; length >= 3 && candidates.length < 8; length -= 1) {
+    const apiKey = `${digits.slice(length)}${rest}`;
+    if (apiKey.length >= 16) candidates.push({ athleteId: `i${digits.slice(0, length)}`, apiKey });
+  }
+  return candidates;
+}
+
+// "/intervals…" counts even when the id is glued to it; other commands need a word end.
+function commandOf(text: string) {
+  if (/^\/intervals/i.test(text)) return "intervals";
+  return /^\/([a-z_]+)(?:@\w+)?(?:\s|$)/i.exec(text)?.[1]?.toLowerCase() ?? null;
+}
+
+async function refuseSecret(message: TelegramMessage) {
+  await athleteBotApi()
+    .deleteMessage(message.chat.id, message.message_id)
+    .catch(() => undefined);
+  await sendAthleteText(
+    message.chat.id,
+    "Похоже, в сообщении был ключ или пароль — я его удалил из чата и никуда не отправлял. Если это ключ Intervals.icu, пришли его так: /intervals i123456 ключ",
+  );
+}
+
+// A long letters-and-digits run in a chat message is most likely a pasted key.
+export function looksLikeSecret(text: string) {
+  return (
+    /^\/intervals/i.test(text.trim()) ||
+    /(?=[A-Za-z0-9]*\d)(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{20,}/.test(text)
+  );
 }
 
 // Checks the key with Intervals.icu, stores it encrypted, removes the message with the
@@ -75,27 +120,39 @@ async function connectIntervals(
   athleteChatId?: bigint,
 ) {
   const chatId = message.chat.id;
-  const parsed = parseIntervalsCommand(text);
-  if (!parsed) {
+  // Whatever follows the command may be a key: it leaves the chat before anything else.
+  if (text.replace(/^\/intervals(?:@\w+)?/i, "").trim()) {
+    await athleteBotApi()
+      .deleteMessage(chatId, message.message_id)
+      .catch(() => undefined);
+  }
+  const candidates = intervalsCandidates(text);
+  if (!candidates.length) {
     await sendAthleteText(
       chatId,
       "Пришли одной строкой: /intervals i123456 ключ\nAthlete ID и API Key — на intervals.icu в Settings, раздел Developer Settings.",
     );
     return;
   }
-  await athleteBotApi()
-    .deleteMessage(chatId, message.message_id)
-    .catch(() => undefined);
   const today = new Date().toISOString().slice(0, 10);
-  try {
-    await fetchIntervals("activities", { oldest: today, newest: today }, parsed);
-  } catch (error) {
-    const status = error instanceof IntervalsApiError ? error.status : 0;
+  let parsed: { athleteId: string; apiKey: string } | null = null;
+  let unavailable = false;
+  for (const candidate of candidates) {
+    try {
+      await fetchIntervals("activities", { oldest: today, newest: today }, candidate);
+      parsed = candidate;
+      break;
+    } catch (error) {
+      const status = error instanceof IntervalsApiError ? error.status : 0;
+      if (![401, 403, 404].includes(status)) unavailable = true;
+    }
+  }
+  if (!parsed) {
     await sendAthleteText(
       chatId,
-      status === 401 || status === 403 || status === 404
-        ? "Intervals.icu не принял этот ID и ключ. Проверь Athlete ID (вида i123456) и создай ключ заново в Settings → Developer Settings. Сообщение с ключом я удалил."
-        : "Intervals.icu сейчас не ответил. Попробуй ещё раз через пару минут. Сообщение с ключом я удалил.",
+      unavailable
+        ? "Intervals.icu сейчас не ответил. Попробуй ещё раз через пару минут. Сообщение с ключом я удалил."
+        : "Intervals.icu не принял этот ID и ключ. Проверь Athlete ID (вида i123456) и создай ключ заново в Settings → Developer Settings. Сообщение с ключом я удалил.",
     );
     return;
   }
@@ -130,7 +187,7 @@ async function connectIntervals(
 async function handleOwner(message: TelegramMessage) {
   const chatId = message.chat.id;
   const text = (message.text ?? "").trim();
-  const command = /^\/([a-z_]+)(?:@\w+)?(?:\s|$)/i.exec(text)?.[1]?.toLowerCase() ?? null;
+  const command = commandOf(text);
   const rest = command ? text.replace(/^\/\S+\s*/, "").trim() : "";
   const [target] = await listApprovedAthletes();
   if (!target) {
@@ -245,7 +302,7 @@ async function reviewFitFile(user: User, message: TelegramMessage) {
 async function handleApproved(user: User, connection: AthleteConnection, message: TelegramMessage) {
   const chatId = message.chat.id;
   const text = (message.text ?? "").trim();
-  const command = /^\/([a-z_]+)(?:@\w+)?(?:\s|$)/i.exec(text)?.[1]?.toLowerCase() ?? null;
+  const command = commandOf(text);
   const rest = command ? text.replace(/^\/\S+\s*/, "").trim() : text;
 
   if (message.document) return reviewFitFile(user, message);
@@ -303,6 +360,8 @@ async function handleApproved(user: User, connection: AthleteConnection, message
       return;
     }
     default:
+      // A pasted key never reaches the chat history or the model.
+      if (looksLikeSecret(text)) return refuseSecret(message);
       return answerQuestion(user, chatId, text);
   }
 }

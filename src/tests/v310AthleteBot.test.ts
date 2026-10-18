@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseIntervalsCommand } from "@/athleteBot/handlers";
+import { intervalsCandidates, looksLikeSecret, parseIntervalsCommand } from "@/athleteBot/handlers";
 import { athleteWebhookSecret } from "@/athleteBot/telegram";
 import { formatDistanceAndPace } from "@/domain/stravaActivity";
 import { markdownToTelegramChunks, telegramHtmlToPlain } from "@/domain/telegramHtml";
@@ -54,6 +54,20 @@ describe("connecting Intervals.icu", () => {
     expect(parseIntervalsCommand("/intervals@coach_bot I98765 not_real_000")?.athleteId).toBe(
       "i98765",
     );
+  });
+
+  it("tries every split when the id and the key are glued to the command", () => {
+    const candidates = intervalsCandidates("/intervalsi1234567zzzzzzzzzzzzzzzzzzzz");
+    expect(candidates[0]?.athleteId).toBe("i1234567");
+    expect(candidates.map((candidate) => candidate.athleteId)).toContain("i123456");
+    expect(intervalsCandidates("/intervals i1234567, zzzzzzzzzzzzzzzzzzzz")).toHaveLength(1);
+    expect(intervalsCandidates("/intervals")).toEqual([]);
+  });
+
+  it("keeps pasted keys away from the coach", () => {
+    expect(looksLikeSecret("/intervalsi1234567zzzzzzzzzzzzzzzzzzzz")).toBe(true);
+    expect(looksLikeSecret("вот ключ 9zz6zzzzzz47zzz86zzz8z")).toBe(true);
+    expect(looksLikeSecret("Что делать завтра после трейла 14,6 км?")).toBe(false);
   });
 
   it("refuses anything that is not an id and a key", () => {
