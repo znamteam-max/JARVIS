@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { editableItemsBlock, parseJarvisDecision } from "@/services/jarvisAgent";
+import { clockTimesIn, editableItemsBlock, parseJarvisDecision } from "@/services/jarvisAgent";
 
 const ID = "5b0d8c52-3f0e-4c3a-9a51-2b7f4f1d9e10";
 
@@ -82,5 +82,33 @@ describe("what JARVIS may touch", () => {
       `${ID} | Скоро: Ср, 21.10 16:00–17:00 · Приход с Робом к ортодонту (🔔 за час)`,
     );
     expect(block).not.toContain("Яндекс");
+  });
+});
+
+describe("reminders at exact times", () => {
+  it("takes a list of local times for each day", () => {
+    const decision = parseJarvisDecision({
+      reply: "",
+      actions: [
+        {
+          type: "create_item",
+          kind: "task",
+          title: "Подготовка по платформе WOW",
+          date: "2026-10-19",
+          time: "23:00",
+          reminders: [],
+          reminder_at: ["2026-10-19T11:00", "2026-10-19T17:00"],
+        },
+      ],
+    });
+    expect(decision.invalid).toBe(0);
+    expect(decision.actions[0].reminder_at).toEqual(["2026-10-19T11:00", "2026-10-19T17:00"]);
+  });
+
+  it("finds clock times in words the reminder parser did not take", () => {
+    expect(clockTimesIn("в 11:00 и в 17:00")).toEqual(["11:00", "17:00"]);
+    expect(clockTimesIn("утром в 9.30, вечером в 21:05")).toEqual(["09:30", "21:05"]);
+    expect(clockTimesIn("каждый час")).toEqual([]);
+    expect(clockTimesIn(null)).toEqual([]);
   });
 });

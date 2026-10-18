@@ -4,7 +4,9 @@ import { z } from "zod";
 import { askClaudeRelay, isClaudeRelayConfigured } from "@/ai/claudeRelay";
 import { writeAudit } from "@/db/queries/audit";
 import { insertCoachMessage, listActiveCoachMessages } from "@/db/queries/coach";
-import type { CoachMessage, User } from "@/db/schema";
+import { stopPoliciesForItem } from "@/db/queries/reminderPolicies";
+import { cancelItemReminders } from "@/db/queries/reminders";
+import type { CoachMessage, PlannerItem, User } from "@/db/schema";
 import { getEnv } from "@/lib/env";
 import { logger } from "@/lib/logger";
 import {
@@ -17,6 +19,7 @@ import {
 } from "@/services/coach";
 import { FoodLogError, logFoodFromText } from "@/services/foodLog";
 import {
+  addReminderAtLocal,
   AppCreateError,
   createPlannerItemFromApp,
   logManualWorkout,
@@ -34,6 +37,8 @@ const MAX_ACTIONS = 5;
 const CHAT_TIMEOUT_MS = 100_000;
 // The Telegram shadow runs after the webhook answer, inside its 60 s.
 const SHADOW_TIMEOUT_MS = 50_000;
+// A short rewrite of the reply when an action failed (Sonnet, low effort).
+const RECONCILE_TIMEOUT_MS = 25_000;
 
 const ACTION_TYPES = [
   "create_item",
@@ -59,8 +64,8 @@ const OPERATOR_INSTRUCTIONS = `Ты — JARVIS: ещё и ведёшь расп�
 
 Если последнее сообщение владельца — просьба что-то сделать, верни нужные actions:
 - create_item: новое дело. kind: task — задача, напоминалка и всё, что надо сделать «до такого-то времени»; event — встреча; training — тренировка с конкретным временем начала. date YYYY-MM-DD, time HH:MM: у task это срок, у event и training — начало. duration_minutes — для встреч и тренировок. Тренировка «до 23:00» или «с дедлайном» без времени начала — это task с time = срок.
-  reminders — быстрые варианты: at_time (в момент), 15m, 1h, 2h, 1d; сложное («каждый час с 8 до 12», «пока не сделаю») — в reminders_text. Без напоминаний — reminders: [] и reminders_text: null.
-- update_item: изменить дело из списка «Дела (можно менять)» по item_id: title, start/end (YYYY-MM-DDTHH:MM, для встреч и тренировок), deadline (для задач) или clear_deadline, reminders_text (новые напоминания заменят старые), clear_reminders: true — убрать все напоминания. Если меняется тип дела (тренировка в 23:00 → задача до 23:00) — delete_item старого и create_item нового. «Исправь», «замени» уже созданное — меняй его, а не добавляй второе.
+  Напоминания: в конкретное время («в 11 и в 17», «утром и вечером», «завтра в 9») — reminder_at: список YYYY-MM-DDTHH:MM, для каждого дня отдельно; относительно срока или начала — reminders: at_time (в момент), 15m, 1h, 2h, 1d; повторяющиеся правила («каждый час с 8 до 12», «пока не сделаю») — reminders_text. Без напоминаний — reminders: [], reminder_at: null и reminders_text: null.
+- update_item: изменить дело из списка «Дела (можно менять)» по item_id: title, start/end (YYYY-MM-DDTHH:MM, для встреч и тренировок), deadline (для задач) или clear_deadline, reminder_at или reminders_text (новые напоминания заменят старые), clear_reminders: true — убрать все напоминания. Если меняется тип дела (тренировка в 23:00 → задача до 23:00) — delete_item старого и create_item нового. «Исправь», «замени» уже созданное — меняй его, а не добавляй второе.
 - delete_item / complete_item: только item_id. Делай это, только если дело явно названо или однозначно следует из разговора; если подходит несколько — actions пустой, переспроси в reply.
 - log_food: food_text — что и сколько съел своими словами; eaten_at — если было не сейчас.
 - log_workout: тренировка, которую не записали часы: sport, duration_minutes, workout_start (если не сейчас), calories и distance_km — если владелец их назвал.
@@ -93,6 +98,7 @@ const DECISION_SCHEMA = {
           duration_minutes: { type: ["integer", "null"] },
           reminders: { type: ["array", "null"], items: { type: "string", enum: REMINDERS } },
           reminders_text: nullableString,
+          reminder_at: { type: ["array", "null"], items: { type: "string" } },
           clear_reminders: { type: ["boolean", "null"] },
           start: nullableString,
           end: nullableString,
@@ -132,6 +138,7 @@ const actionSchema = z.object({
     .max(5)
     .nullish(),
   reminders_text: z.string().trim().max(300).nullish(),
+  reminder_at: z.array(localDateTime).max(10).nullish(),
   clear_reminders: z.boolean().nullish(),
   start: localDateTime.nullish(),
   end: localDateTime.nullish(),
@@ -237,6 +244,34 @@ function whenLabel(date: Date | null, timezone: string) {
 
 type Outcome = { done?: string; problem?: string };
 
+// "в 11:00 и в 17:00" → ["11:00", "17:00"]: the safety net when the reminder parser gives up.
+export function clockTimesIn(text: string | null | undefined) {
+  return [...(text ?? "").matchAll(/(?:^|[^\d])([01]?\d|2[0-3])[:.]([0-5]\d)(?!\d)/g)].map(
+    (match) => `${match[1].padStart(2, "0")}:${match[2]}`,
+  );
+}
+
+function timesOnItemDay(item: PlannerItem, text: string | null | undefined, timezone: string) {
+  const anchor = item.startAt ?? item.dueAt;
+  if (!anchor) return [];
+  const day = DateTime.fromJSDate(anchor, { zone: "utc" }).setZone(timezone).toISODate();
+  return clockTimesIn(text).map((time) => `${day}T${time}`);
+}
+
+// Reminders at exact local times; "replace" first stops the item's old reminders.
+async function setExactReminders(item: PlannerItem, locals: string[], now: Date, replace: boolean) {
+  if (!locals.length) return [];
+  if (replace) {
+    await cancelItemReminders(item.userId, item.id);
+    await stopPoliciesForItem(item.userId, item.id);
+  }
+  const added: string[] = [];
+  for (const local of [...new Set(locals)].sort()) {
+    if (await addReminderAtLocal(item, local, now)) added.push(local);
+  }
+  return added;
+}
+
 async function execute(user: User, action: JarvisAction, now: Date): Promise<Outcome> {
   const tz = user.timezone;
   switch (action.type) {
@@ -245,7 +280,7 @@ async function execute(user: User, action: JarvisAction, now: Date): Promise<Out
       const kind = action.kind ?? "task";
       const reminders =
         action.reminders ??
-        (action.date && action.time && !action.reminders_text
+        (action.date && action.time && !action.reminders_text && !action.reminder_at?.length
           ? [kind === "task" ? ("at_time" as const) : ("1h" as const)]
           : []);
       const { item, extraUnderstood } = await createPlannerItemFromApp({
@@ -261,15 +296,26 @@ async function execute(user: User, action: JarvisAction, now: Date): Promise<Out
       });
       const when = whenLabel(item.startAt ?? item.dueAt, tz);
       const whenText = when ? (item.startAt ? ` — ${when}` : ` — до ${when}`) : "";
-      const remindersText = action.reminders_text
-        ? ""
-        : reminders.length
-          ? ` · 🔔 ${reminders.map((choice) => REMINDER_CHOICES[choice].label).join(", ")}`
-          : " · без напоминаний";
+      // Exact times, plus the safety net for times the reminder parser did not take.
+      const exact = [
+        ...(action.reminder_at ?? []),
+        ...(extraUnderstood === false ? timesOnItemDay(item, action.reminders_text, tz) : []),
+      ];
+      const added = await setExactReminders(item, exact, now, false);
+      const labels = [
+        ...reminders.map((choice) => REMINDER_CHOICES[choice].label),
+        ...added.map((local) => local.slice(11)),
+      ];
+      const remindersText =
+        action.reminders_text && extraUnderstood !== false
+          ? ""
+          : labels.length
+            ? ` · 🔔 ${labels.join(", ")}`
+            : " · без напоминаний";
       return {
         done: `✅ Добавил «${item.title}»${whenText}${remindersText}`,
         problem:
-          extraUnderstood === false
+          extraUnderstood === false && !added.length
             ? `Не понял напоминания «${action.reminders_text}» — дело добавил без них`
             : undefined,
       };
@@ -287,21 +333,37 @@ async function execute(user: User, action: JarvisAction, now: Date): Promise<Out
         clearReminders: action.clear_reminders ?? false,
       };
       const cleared = action.clear_reminders ? " · напоминания убрал" : "";
+      const exactNote = (added: string[]) =>
+        added.length ? ` · 🔔 ${added.map((local) => local.slice(11)).join(", ")}` : "";
       try {
         const { item } = await editPlannerItemFromApp({
           ...edit,
-          remindersText: action.reminders_text,
+          remindersText: action.reminder_at?.length ? null : action.reminders_text,
         });
-        return { done: `✏️ Изменил «${item.title}»${cleared}` };
+        const added = action.reminder_at?.length
+          ? await setExactReminders(item, action.reminder_at, now, true)
+          : [];
+        return { done: `✏️ Изменил «${item.title}»${cleared}${exactNote(added)}` };
       } catch (error) {
         // An unclear reminder must not cancel the rest of the edit.
         if (!(error instanceof PlannerItemEditError) || error.code !== "reminders_not_understood") {
           throw error;
         }
         const { item, changed } = await editPlannerItemFromApp(edit);
+        const added = await setExactReminders(
+          item,
+          timesOnItemDay(item, action.reminders_text, tz),
+          now,
+          true,
+        );
         return {
-          done: changed ? `✏️ Изменил «${item.title}»${cleared}` : undefined,
-          problem: `Не понял напоминания «${action.reminders_text}» — их не менял`,
+          done:
+            changed || added.length
+              ? `✏️ Изменил «${item.title}»${cleared}${exactNote(added)}`
+              : undefined,
+          problem: added.length
+            ? undefined
+            : `Не понял напоминания «${action.reminders_text}» — их не менял`,
         };
       }
     }
@@ -394,6 +456,25 @@ export function composeJarvisAnswer(params: { reply: string; done: string[]; fai
   return [status, params.reply].filter(Boolean).join("\n\n") || "Готово.";
 }
 
+// The model writes its reply before anything runs; when something failed, the reply is
+// rewritten against the real results so it never says "поставил", "исправил" untruthfully.
+async function reconcileReply(reply: string, done: string[], failed: string[]) {
+  if (!reply || !failed.length) return reply;
+  try {
+    const answer = await askClaudeRelay({
+      system:
+        "Ты редактор. Тебе дают черновик ответа ассистента и фактические результаты действий. Перепиши черновик так, чтобы в нём не было ничего, что противоречит результатам: не выдавай за сделанное то, что в списке «Не получилось», и не повторяй сами строки результатов — они уже стоят над ответом. Ничего нового не добавляй, полезные советы сохрани, стиль и язык оставь. Если после правки сказать нечего — верни пустой ответ. Верни только текст ответа.",
+      prompt: `Черновик:\n${reply}\n\nСделано:\n${done.join("\n") || "—"}\n\nНе получилось:\n${failed.join("\n")}`,
+      model: "sonnet",
+      effort: "low",
+      timeoutMs: RECONCILE_TIMEOUT_MS,
+    });
+    return answer.result?.trim() ?? "";
+  } catch {
+    return `${reply}\n\n⚠️ Если выше сказано, что всё сделано, — верны строки с ✅ и ⚠️ в начале ответа.`;
+  }
+}
+
 const FALLBACK_NOTE =
   "Claude сейчас недоступен, отвечаешь ты как запасной помощник. Ничего не меняй в расписании: если владелец просит что-то сделать, скажи, что это не выполнено, и предложи повторить через минуту или сделать кнопками приложения.";
 
@@ -439,7 +520,11 @@ export async function askJarvis(params: { user: User; message: string; now?: Dat
     await insertCoachMessage({
       userId: user.id,
       role: "assistant",
-      content: composeJarvisAnswer({ reply: decision.reply, done, failed }),
+      content: composeJarvisAnswer({
+        reply: await reconcileReply(decision.reply, done, failed),
+        done,
+        failed,
+      }),
       metadata: {
         engine: "claude",
         model: decision.model,

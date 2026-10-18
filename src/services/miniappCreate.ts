@@ -151,6 +151,15 @@ export async function createPlannerItemFromApp(params: {
   return { item, extraUnderstood };
 }
 
+// "Напомни в 11:00 и в 17:00": one reminder at an exact local time ("yyyy-MM-ddTHH:mm"),
+// skipped when that moment has already passed.
+export async function addReminderAtLocal(item: PlannerItem, local: string, now = new Date()) {
+  const fireAt = DateTime.fromISO(local, { zone: item.timezone });
+  if (!fireAt.isValid || fireAt.toJSDate() <= now) return false;
+  await addOneTimeReminder(item, fireAt.toUTC().toJSDate(), "в это время");
+  return true;
+}
+
 async function addOneTimeReminder(item: PlannerItem, fireAt: Date, label: string, minutes = 0) {
   const policy = await createReminderPolicyIfMissing({
     userId: item.userId,
