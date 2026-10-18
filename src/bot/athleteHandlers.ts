@@ -23,7 +23,8 @@ export function registerAthleteHandlers(bot: Bot<BotContext>) {
     await ctx
       .editMessageText(
         result.outcome === "approved"
-          ? `✅ ${result.name}: доступ к тренеру дан. Бот уже прислал инструкцию: подключить Intervals.icu и заполнить профиль.`
+          ? `✅ ${result.name}: доступ к тренеру дан.
+Intervals.icu и профиль можно настроить за этого человека прямо в тренерском боте из вашего Telegram: /intervals i123456 ключ, /profile текст.`
           : `Отказано: ${result.name}.`,
       )
       .catch(() => undefined);

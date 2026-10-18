@@ -1,6 +1,10 @@
 import { InputFile } from "grammy";
 
-import { getAthleteConnection, saveAthleteIntervalsKey } from "@/db/queries/athletes";
+import {
+  getAthleteConnection,
+  listApprovedAthletes,
+  saveAthleteIntervalsKey,
+} from "@/db/queries/athletes";
 import {
   archiveCoachConversation,
   getCoachProfile,
@@ -11,6 +15,7 @@ import { getUserById } from "@/db/queries/users";
 import type { AthleteConnection, User } from "@/db/schema";
 import { encryptSecret } from "@/integrations/encryption";
 import { fetchIntervals, IntervalsApiError } from "@/integrations/intervals";
+import { getAllowedTelegramUserIds } from "@/lib/env";
 import { UserFacingError } from "@/lib/errors";
 import { logger } from "@/lib/logger";
 import { generateCoachReply, guardCoachDailyLimit, uploadRideToCoach } from "@/services/coach";
@@ -61,8 +66,14 @@ export function parseIntervalsCommand(text: string) {
 }
 
 // Checks the key with Intervals.icu, stores it encrypted, removes the message with the
-// key from the chat and imports the last month.
-async function connectIntervals(user: User, message: TelegramMessage, text: string) {
+// key from the chat and imports the last month. When the owner does it for the athlete,
+// the athlete hears about it in their own chat.
+async function connectIntervals(
+  user: User,
+  message: TelegramMessage,
+  text: string,
+  athleteChatId?: bigint,
+) {
   const chatId = message.chat.id;
   const parsed = parseIntervalsCommand(text);
   if (!parsed) {
@@ -105,6 +116,77 @@ async function connectIntervals(user: User, message: TelegramMessage, text: stri
       ? `✅ Intervals.icu подключён, сообщение с ключом удалено. Загрузил тренировок за месяц: ${result.imported}, дней сна и пульса: ${result.wellnessDays}.\nТеперь после каждой тренировки пришлю разбор — примерно через 15–30 минут после того, как она появится в Intervals.`
       : "✅ Ключ сохранён, сообщение удалено. Первая загрузка тренировок не прошла — попробую снова в течение 15 минут.",
   );
+  if (athleteChatId) {
+    await sendAthleteText(
+      athleteChatId,
+      "✅ Intervals.icu подключён: тренировки, сон и пульс теперь приходят сами. После каждой тренировки пришлю разбор, а вопросы можно задавать обычными сообщениями.",
+    ).catch(() => undefined);
+  }
+}
+
+// The owner in the coach bot: sets up the athlete's Intervals.icu, profile and FTP from
+// their own Telegram, so the athlete only has to press Start. Questions to the coach stay
+// the athlete's. The coach bot never journals messages, so the key is only stored encrypted.
+async function handleOwner(message: TelegramMessage) {
+  const chatId = message.chat.id;
+  const text = (message.text ?? "").trim();
+  const command = /^\/([a-z_]+)(?:@\w+)?(?:\s|$)/i.exec(text)?.[1]?.toLowerCase() ?? null;
+  const rest = command ? text.replace(/^\/\S+\s*/, "").trim() : "";
+  const [target] = await listApprovedAthletes();
+  if (!target) {
+    await sendAthleteText(
+      chatId,
+      "Вы владелец. Спортсменов пока нет: пусть человек нажмёт Start в этом боте, а вы — «Дать доступ» в JARVIS. Потом здесь можно будет подключить за него Intervals.icu и заполнить профиль.",
+    );
+    return;
+  }
+  const { user, connection } = target;
+  const name = connection.firstName ?? connection.telegramUsername ?? "спортсмен";
+  switch (command) {
+    case "intervals":
+      return connectIntervals(user, message, text, user.telegramUserId);
+    case "profile":
+      if (rest) {
+        await saveAthleteProfile(user, rest);
+        await sendAthleteText(chatId, `✅ Профиль «${name}» сохранён.`);
+        return;
+      }
+      await sendAthleteText(
+        chatId,
+        `Профиль «${name}»:\n\n${(await getCoachProfile(user.id))?.profile?.trim() || "пусто"}\n\n${PROFILE_TEMPLATE}`,
+      );
+      return;
+    case "ftp": {
+      const ftp = await saveAthleteFtp(user, rest);
+      await sendAthleteText(
+        chatId,
+        ftp ? `✅ FTP «${name}» — ${ftp} Вт.` : "Напишите FTP в ваттах, например: /ftp 210",
+      );
+      return;
+    }
+    default:
+      await sendAthleteText(
+        chatId,
+        `Вы владелец. Здесь можно настроить тренера за «${name}»:\n• /intervals i123456 ключ — подключить Intervals.icu (сообщение с ключом я сразу удалю)\n• /profile текст — профиль: старт, дата, цель, опыт, сколько часов в неделю\n• /ftp 210 — FTP\n\n${await statusText(user, connection)}\n\nВопросы тренеру и разборы — в чате самого спортсмена.`,
+      );
+  }
+}
+
+async function saveAthleteProfile(user: User, text: string) {
+  const current = await getCoachProfile(user.id);
+  await saveCoachProfile({ userId: user.id, profile: text, settings: current?.settings ?? {} });
+}
+
+async function saveAthleteFtp(user: User, raw: string) {
+  const ftp = Math.round(Number(raw.replace(",", ".")));
+  if (!Number.isFinite(ftp) || ftp < 80 || ftp > 500) return null;
+  const current = await getCoachProfile(user.id);
+  await saveCoachProfile({
+    userId: user.id,
+    profile: current?.profile ?? "",
+    settings: { ...(current?.settings ?? {}), ftp },
+  });
+  return ftp;
 }
 
 async function statusText(user: User, connection: AthleteConnection) {
@@ -181,20 +263,15 @@ async function handleApproved(user: User, connection: AthleteConnection, message
     case "intervals":
       return connectIntervals(user, message, text);
     case "profile": {
-      const current = await getCoachProfile(user.id);
       if (rest) {
-        await saveCoachProfile({
-          userId: user.id,
-          profile: rest,
-          settings: current?.settings ?? {},
-        });
+        await saveAthleteProfile(user, rest);
         await sendAthleteText(
           chatId,
           "✅ Профиль сохранён. Тренер будет опираться на него; обновить — снова /profile и новый текст целиком.",
         );
         return;
       }
-      const profile = current?.profile?.trim();
+      const profile = (await getCoachProfile(user.id))?.profile?.trim();
       await sendAthleteText(
         chatId,
         profile ? `Твой профиль:\n\n${profile}\n\n${PROFILE_TEMPLATE}` : PROFILE_TEMPLATE,
@@ -202,18 +279,11 @@ async function handleApproved(user: User, connection: AthleteConnection, message
       return;
     }
     case "ftp": {
-      const ftp = Number(rest.replace(",", "."));
-      if (!Number.isFinite(ftp) || ftp < 80 || ftp > 500) {
-        await sendAthleteText(chatId, "Напиши FTP в ваттах, например: /ftp 210");
-        return;
-      }
-      const current = await getCoachProfile(user.id);
-      await saveCoachProfile({
-        userId: user.id,
-        profile: current?.profile ?? "",
-        settings: { ...(current?.settings ?? {}), ftp: Math.round(ftp) },
-      });
-      await sendAthleteText(chatId, `✅ FTP ${Math.round(ftp)} Вт сохранён.`);
+      const ftp = await saveAthleteFtp(user, rest);
+      await sendAthleteText(
+        chatId,
+        ftp ? `✅ FTP ${ftp} Вт сохранён.` : "Напиши FTP в ваттах, например: /ftp 210",
+      );
       return;
     }
     case "new":
@@ -243,6 +313,15 @@ export async function handleAthleteUpdate(update: TelegramUpdate) {
   const message = update.message;
   if (!message?.from || message.from.is_bot || message.chat.type !== "private") return;
   const from = message.from;
+  if (getAllowedTelegramUserIds().has(String(from.id))) {
+    await handleOwner(message).catch(async (error) => {
+      logger.warn("Coach bot owner command failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await sendAthleteText(message.chat.id, "Не получилось. Попробуйте ещё раз через минуту.");
+    });
+    return;
+  }
   const connection = await getAthleteConnection(from.id);
   if (!connection || connection.status === "pending") {
     await askOwnerForAthleteAccess({

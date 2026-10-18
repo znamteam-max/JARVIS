@@ -1,4 +1,4 @@
-import { and, eq, isNotNull } from "drizzle-orm";
+import { and, desc, eq, isNotNull } from "drizzle-orm";
 
 import { getDb } from "../client";
 import { athleteConnections, users } from "../schema";
@@ -64,6 +64,16 @@ export async function saveAthleteIntervalsKey(params: {
       updatedAt: new Date(),
     })
     .where(eq(athleteConnections.userId, params.userId));
+}
+
+// Everyone the owner let in, newest first, with their user rows.
+export async function listApprovedAthletes() {
+  return getDb()
+    .select({ connection: athleteConnections, user: users })
+    .from(athleteConnections)
+    .innerJoin(users, eq(users.id, athleteConnections.userId))
+    .where(eq(athleteConnections.status, "approved"))
+    .orderBy(desc(athleteConnections.updatedAt));
 }
 
 // Approved athletes whose Intervals.icu is connected, with their user rows.
