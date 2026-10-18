@@ -23,7 +23,8 @@ export async function getUserByTelegramId(
     .from(users)
     .where(eq(users.telegramUserId, toTelegramBigInt(telegramUserId)))
     .limit(1);
-  return user ? { ...user, timezone: getOwnerTimezone() } : null;
+  if (!user) return null;
+  return user.role === "owner" ? { ...user, timezone: getOwnerTimezone() } : user;
 }
 
 export async function getUserById(userId: string): Promise<User | null> {
@@ -31,8 +32,32 @@ export async function getUserById(userId: string): Promise<User | null> {
   return user ?? null;
 }
 
+// Planner users only: digests, check-ins and calendar import must never reach someone
+// who only uses the coach bot.
 export async function listUsers(): Promise<User[]> {
-  return getDb().select().from(users);
+  return getDb().select().from(users).where(eq(users.role, "owner"));
+}
+
+// The coach bot's athlete: a user row of its own, outside the planner.
+export async function createAthleteUser(profile: TelegramProfile & { timezone: string }) {
+  const now = new Date();
+  const [user] = await getDb()
+    .insert(users)
+    .values({
+      telegramUserId: toTelegramBigInt(profile.id),
+      telegramUsername: profile.username,
+      firstName: profile.firstName,
+      timezone: profile.timezone,
+      role: "athlete",
+      isOnboarded: true,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: users.telegramUserId,
+      set: { telegramUsername: profile.username, firstName: profile.firstName, updatedAt: now },
+    })
+    .returning();
+  return user;
 }
 
 export async function getOrCreateOwnerUser(profile: TelegramProfile): Promise<User> {

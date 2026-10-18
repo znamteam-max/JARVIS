@@ -18,7 +18,7 @@ import { activityWatts, withoutWatchDuplicates } from "@/domain/activityDedupe";
 import { chatModelLabel } from "@/domain/chatModelLabel";
 import { recentLoadBlock } from "@/domain/recentLoad";
 import { formatRideForCoach, type RideSummary } from "@/domain/rideAnalysis";
-import { sportLabel } from "@/domain/stravaActivity";
+import { formatDistanceAndPace, sportLabel } from "@/domain/stravaActivity";
 import { parseFitRide } from "@/integrations/fitFile";
 import { getEnv } from "@/lib/env";
 import { UserFacingError } from "@/lib/errors";
@@ -30,6 +30,8 @@ const DAILY_QUESTION_LIMIT = 60;
 const CLAUDE_TIMEOUT_MS = 90_000;
 const REVIEW_IN_CONTEXT_CHARS = 1800;
 const DEFAULT_FTP = 300;
+// Only for IF/TSS of an uploaded FIT file when an athlete has not set /ftp yet.
+const DEFAULT_ATHLETE_FTP = 200;
 
 export const COACH_INSTRUCTIONS = `Ты — личный тренер владельца приложения JARVIS по велоспорту и выносливости, и заодно помощник по его дню. Отвечай по-русски.
 
@@ -53,6 +55,46 @@ export const COACH_INSTRUCTIONS = `Ты — личный тренер владе
 // Reviews and FIT uploads only answer; changes go through the JARVIS chat.
 const ADVICE_ONLY_NOTE =
   "В этом ответе ты ничего не меняешь в расписании. Если советуешь что-то поставить или перенести — предложи владельцу попросить об этом в чате одной фразой.";
+
+// The separate coach bot: a triathlete, read in Telegram, no planner behind it.
+export const TRIATHLON_COACH_INSTRUCTIONS = `Ты — личный тренер по триатлону (плавание, велосипед, бег). Твоя спортсменка готовится к половинке Айронмена (70.3: 1,9 км плавания, 90 км велосипеда, 21,1 км бега) летом; старт, дата, цель и уровень — в её профиле. Отвечай по-русски, на «ты».
+
+Стиль: прямо и по делу, цифрами, без лишней похвалы и клише. Сравнивай тренировки числами. Не повторяй одни и те же предостережения. Если данных нет или они ненадёжны — так и скажи, не изображай точность. Ответ читают в Telegram на телефоне: коротко; таблица — только если без неё никак, не больше 4 узких колонок.
+
+Данные ниже:
+- «Профиль» — от самой спортсменки: старт и дата, цель по времени, опыт, объём, лучшие результаты, травмы, бассейн и открытая вода, сколько часов в неделю есть. Опирайся на него.
+- «Нагрузка последних дней» — тренировки по дням и сколько часов прошло с конца последней. Заезды с перерывом до 30 минут — одна тренировка.
+- «Последний разбор» — что ты сам советовал после последней тренировки.
+- «Заезды с мощностью» — посекундный разбор велотренировок с мощностью (Zwift).
+- «Все тренировки» (Intervals.icu: часы Garmin и Zwift): бег — темп на км и пульс; плавание — дистанция и темп на 100 м; велосипед — мощность (Zwift) или скорость и пульс. Если в то же время есть и запись часов, и заезд Zwift — это одна тренировка, дубли часов уже убраны.
+- Сон, HRV и пульс покоя с часов Garmin.
+
+Как тренер:
+- Веди подготовку к старту по периодам (база → развитие → пик → подводка), считая недели до даты старта из профиля. Баланс трёх видов — по её слабым местам; силовая 1–2 раза в неделю; связки «велосипед → бег» ближе к сезону; в плавании — техника и открытая вода.
+- Длинные тренировки наращивай постепенно (примерно до +10% в неделю); после 3 недель роста — разгрузочная неделя.
+- Когда спрашивают, что делать сегодня, — одна конкретная тренировка: вид, длительность, структура, интенсивность (пульс, темп или ватты), еда и вода — и в 1–2 строках почему. Если по данным лучше отдых — скажи прямо.
+- Прежде чем советовать, сверься с «Нагрузкой последних дней» и «Последним разбором»; не противоречь им без новой причины, а если меняешь совет — скажи, что изменилось. У каждого сообщения переписки есть время.
+- Боль, травма, плохое самочувствие — не ставь диагнозов: советуй снизить нагрузку и обратиться к врачу.
+- Если в профиле нет даты старта, уровня или доступных часов — коротко попроси заполнить его командой /profile.
+Не выдумывай тренировок, которых нет в данных. Каждое число (темп, пульс, ватты, время) бери из данных или прямо считай из них; если нужного числа нет — не пиши его и не оценивай «на глаз».`;
+
+export function isAthlete(user: Pick<User, "role">) {
+  return user.role === "athlete";
+}
+
+// An athlete's FTP: their own /ftp, else what Intervals.icu has on the latest ride.
+export function athleteFtp(
+  settings: Record<string, unknown> | undefined,
+  activities: Array<{ raw: unknown }> = [],
+) {
+  const own = Number(settings?.ftp);
+  if (Number.isFinite(own) && own > 80) return own;
+  for (const activity of [...activities].reverse()) {
+    const ftp = Number((activity.raw as Record<string, unknown> | null)?.icu_ftp);
+    if (Number.isFinite(ftp) && ftp > 80) return ftp;
+  }
+  return null;
+}
 
 export type CoachMessageView = {
   id: string;
@@ -109,7 +151,8 @@ export async function buildCoachContext(
     listRideFilesSince(user.id, local.minus({ days: 42 }).toJSDate()),
     listFitnessActivitiesSince(user.id, local.minus({ days: 21 }).toJSDate()),
     listWellnessDaysSince(user.id, local.minus({ days: 14 }).toISODate() ?? ""),
-    preparedSummary ?? buildMiniAppSummary(user, now),
+    // An athlete of the coach bot has no planner: no schedule, no food log.
+    preparedSummary ?? (isAthlete(user) ? null : buildMiniAppSummary(user, now)),
     getLatestCoachReview(user.id),
   ]);
   const settings = profile?.settings ?? {};
@@ -136,6 +179,7 @@ export async function buildCoachContext(
     return [
       `${label(activity.startAt)} ${sportLabel(activity.sportType)} «${activity.name}»`,
       `${Math.round(activity.movingTimeS / 60)} мин`,
+      formatDistanceAndPace(activity),
       watts ? `avg ${watts} Вт, NP ${raw.icu_weighted_avg_watts ?? "?"}` : null,
       activity.averageHeartrate
         ? `пульс ${activity.averageHeartrate}/${activity.maxHeartrate}`
@@ -165,6 +209,29 @@ export async function buildCoachContext(
         .filter(Boolean)
         .join(", "),
     );
+  if (!summary) {
+    const ftp = athleteFtp(settings, workouts);
+    return [
+      `Сейчас: ${local.toFormat("cccc, d MMMM yyyy, HH:mm")} (${tz}).`,
+      `Настройки: FTP ${ftp ? `${ftp} Вт` : "не задан"}${settings.hrMax ? `, HRmax ${settings.hrMax}` : ""}${settings.weightKg ? `, вес ~${settings.weightKg} кг` : ""}.`,
+      "",
+      recentLoadBlock({ activities: workouts, now, timezone: tz }),
+      "",
+      reviewBlock,
+      "",
+      "## Профиль (от спортсменки)",
+      profile?.profile ?? "Профиль ещё не заполнен.",
+      "",
+      "## Заезды с мощностью (посекундный разбор), 6 недель",
+      rideLines.length ? rideLines.join("\n") : "Нет заездов с мощностью.",
+      "",
+      "## Все тренировки (Intervals.icu: часы Garmin и Zwift), 3 недели",
+      activityLines.length ? activityLines.join("\n") : "Нет данных.",
+      "",
+      "## Сон и восстановление, 2 недели",
+      wellnessLines.length ? wellnessLines.join("\n") : "Нет данных.",
+    ].join("\n");
+  }
   const planLines = summary.plan
     .filter((section) => /^(Сейчас|Сегодня|Завтра|Скоро|Просрочено|Не закрыто)/.test(section.title))
     .flatMap((section) => [`${section.title}:`, ...section.rows.map((row) => `- ${row.text}`)]);
@@ -203,6 +270,7 @@ export function conversationTranscript(
   history: Array<Pick<CoachMessage, "role" | "content" | "createdAt" | "metadata">>,
   timezone: string,
   assistantName: string,
+  userName = "Владелец",
 ) {
   const lines = history.map((message) => {
     const when = DateTime.fromJSDate(message.createdAt ?? new Date(), { zone: "utc" })
@@ -215,7 +283,7 @@ export function conversationTranscript(
         ? "Система"
         : message.role === "assistant"
           ? `${assistantName}${model ? ` (${model})` : ""}`
-          : "Владелец";
+          : userName;
     return `[${when}] ${who}: ${message.content}`;
   });
   return `Переписка (последние сообщения, время местное):\n\n${lines.join("\n\n")}\n\nОтветь на последнее сообщение.`;
@@ -233,18 +301,25 @@ export async function generateCoachReply(
     metadata?: Record<string, unknown>;
   } = {},
 ) {
+  const athlete = isAthlete(user);
   const history = await listActiveCoachMessages(user.id, HISTORY_MESSAGES);
   const context = await buildCoachContext(user, now);
   const instructions = [
-    COACH_INSTRUCTIONS,
-    options.engine === "openai" ? null : ADVICE_ONLY_NOTE,
+    athlete ? TRIATHLON_COACH_INSTRUCTIONS : COACH_INSTRUCTIONS,
+    options.engine === "openai" || athlete ? null : ADVICE_ONLY_NOTE,
     extraInstruction,
     `# Данные\n${context}`,
   ]
     .filter(Boolean)
     .join("\n\n");
-  const transcript = conversationTranscript(history, user.timezone, "Тренер");
-  if (options.engine !== "openai" && isClaudeRelayConfigured()) {
+  const transcript = conversationTranscript(
+    history,
+    user.timezone,
+    "Тренер",
+    athlete ? "Спортсменка" : "Владелец",
+  );
+  // The owner's Max subscription is the owner's alone: athletes are answered by OpenAI.
+  if (!athlete && options.engine !== "openai" && isClaudeRelayConfigured()) {
     try {
       const answer = await askClaudeRelay({
         system: instructions,
@@ -277,7 +352,9 @@ export async function generateCoachReply(
       max_output_tokens: 2000,
     });
 
-  const primary = getEnv().COACH_MODEL;
+  const primary = athlete
+    ? (getEnv().ATHLETE_COACH_MODEL ?? getEnv().COACH_MODEL)
+    : getEnv().COACH_MODEL;
   let model = primary;
   let response;
   try {
@@ -315,7 +392,7 @@ export async function generateCoachReply(
       ...options.metadata,
       engine: "openai",
       model: response.model ?? model,
-      fallback: isClaudeRelayConfigured(),
+      fallback: !athlete && isClaudeRelayConfigured(),
     },
   });
   return text;
@@ -347,7 +424,10 @@ export async function uploadRideToCoach(params: {
   const now = params.now ?? new Date();
   await guardCoachDailyLimit(params.user, now);
   const profile = await getCoachProfile(params.user.id);
-  const summary = parseFitRide(params.bytes, { ftp: coachFtp(profile?.settings) });
+  const ftp = isAthlete(params.user)
+    ? (athleteFtp(profile?.settings) ?? DEFAULT_ATHLETE_FTP)
+    : coachFtp(profile?.settings);
+  const summary = parseFitRide(params.bytes, { ftp });
   const startedAt = new Date(summary.startedAt);
   await upsertRideFile({
     userId: params.user.id,

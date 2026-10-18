@@ -3,7 +3,7 @@ import { after, NextResponse } from "next/server";
 import { runDueReminders } from "@/jobs/runDueReminders";
 import { reviewNewWorkoutsIfDue } from "@/services/coachReviews";
 import { backfillFoodPhotos } from "@/services/foodPhotos";
-import { syncIntervalsIfDue } from "@/services/intervalsSync";
+import { syncAthletesIntervalsIfDue, syncIntervalsIfDue } from "@/services/intervalsSync";
 import { syncStravaIfDue } from "@/services/stravaSync";
 import { requireEnv } from "@/lib/env";
 import { logger } from "@/lib/logger";
@@ -25,6 +25,8 @@ export async function POST(request: Request) {
   // Piggybacks on the scheduler tick; never lets a Strava problem fail reminders.
   const strava = await syncStravaIfDue().catch(() => ({ synced: false }));
   const intervals = await syncIntervalsIfDue().catch(() => ({ synced: false }));
+  // The coach bot's athletes, each with their own Intervals.icu key.
+  const athletes = await syncAthletesIntervalsIfDue().catch(() => ({ athletes: 0 }));
   const foodPhotos = await backfillFoodPhotos().catch(() => ({ stored: 0 }));
   // New workouts get the coach's comment; the scheduler does not wait for the model.
   after(() =>
@@ -34,5 +36,5 @@ export async function POST(request: Request) {
       }),
     ),
   );
-  return NextResponse.json({ ok: true, ...result, strava, intervals, foodPhotos });
+  return NextResponse.json({ ok: true, ...result, strava, intervals, athletes, foodPhotos });
 }

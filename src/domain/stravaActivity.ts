@@ -73,6 +73,7 @@ const SPORTS: Record<string, { label: string; icon: string; pace?: "km" | "100m"
   MountainBikeRide: { label: "МТБ", icon: "🚵", pace: "speed" },
   VirtualRide: { label: "Велотренажёр", icon: "🚴", pace: "speed" },
   Swim: { label: "Плавание", icon: "🏊", pace: "100m" },
+  OpenWaterSwim: { label: "Открытая вода", icon: "🏊", pace: "100m" },
   WeightTraining: { label: "Силовая", icon: "🏋️" },
   Workout: { label: "Тренировка", icon: "💪" },
   Crossfit: { label: "Кроссфит", icon: "💪" },
@@ -85,6 +86,15 @@ const SPORTS: Record<string, { label: string; icon: string; pace?: "km" | "100m"
 
 export function sportLabel(sportType: string) {
   return SPORTS[sportType]?.label ?? sportType;
+}
+
+// "10,2 км, 5:32 /км" for a run, "1,5 км, 2:05 /100 м" for a swim: for the coach's data.
+export function formatDistanceAndPace(
+  activity: Pick<ActivityView, "sportType" | "distanceM" | "movingTimeS">,
+) {
+  if (activity.distanceM <= 0) return null;
+  const pace = formatPace(activity as ActivityView, SPORTS[activity.sportType]?.pace);
+  return [formatKm(activity.distanceM), pace].filter(Boolean).join(", ");
 }
 
 export function formatActivityCard(activity: ActivityView) {

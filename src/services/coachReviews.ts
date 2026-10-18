@@ -3,6 +3,8 @@ import { DateTime } from "luxon";
 
 import { canUseOpenAI } from "@/ai/openaiClient";
 import { getBot } from "@/bot/createBot";
+import { sendAthleteMarkdown, isAthleteBotConfigured } from "@/athleteBot/telegram";
+import { listConnectedAthletes } from "@/db/queries/athletes";
 import { getCoachProfile, insertCoachMessage, upsertRideFile } from "@/db/queries/coach";
 import { claimActivitiesForCoach, listActivitiesAwaitingCoach } from "@/db/queries/fitness";
 import { getUserByTelegramId } from "@/db/queries/users";
@@ -13,11 +15,12 @@ import {
   withoutWatchDuplicates,
 } from "@/domain/activityDedupe";
 import { analyseRide, samplesFromStreams } from "@/domain/rideAnalysis";
-import { sportLabel } from "@/domain/stravaActivity";
-import { fetchIntervalsActivityStreams } from "@/integrations/intervals";
+import { formatDistanceAndPace, sportLabel } from "@/domain/stravaActivity";
+import { fetchIntervalsActivityStreams, type IntervalsCredentials } from "@/integrations/intervals";
 import { getAllowedTelegramUserIds, getEnv } from "@/lib/env";
 import { logger } from "@/lib/logger";
-import { coachFtp, generateCoachReply } from "@/services/coach";
+import { athleteFtp, coachFtp, generateCoachReply, isAthlete } from "@/services/coach";
+import { athleteIntervalsCredentials } from "@/services/intervalsSync";
 
 const LOOKBACK_MS = 36 * 60 * 60 * 1000;
 // Back-to-back sessions (two Zwift workouts with a short break) are reviewed together:
@@ -41,7 +44,8 @@ function describe(activity: FitnessActivity, timezone: string) {
   return [
     `${when} ${sportLabel(activity.sportType)} «${activity.name}»`,
     `${Math.round(activity.movingTimeS / 60)} мин`,
-    watts ? `avg ${watts} Вт, NP ${raw.icu_weighted_avg_watts ?? "?"}` : "без мощности",
+    formatDistanceAndPace(activity),
+    watts ? `avg ${watts} Вт, NP ${raw.icu_weighted_avg_watts ?? "?"}` : null,
     activity.averageHeartrate
       ? `пульс ${activity.averageHeartrate}/${activity.maxHeartrate}`
       : null,
@@ -53,10 +57,15 @@ function describe(activity: FitnessActivity, timezone: string) {
 }
 
 // Per-second power/HR from Intervals → the same ride summary as an uploaded FIT file.
-async function storePowerDetails(user: User, activity: FitnessActivity, ftp: number) {
+async function storePowerDetails(
+  user: User,
+  activity: FitnessActivity,
+  ftp: number,
+  credentials?: IntervalsCredentials,
+) {
   if (!activityWatts(activity)) return;
   try {
-    const streams = await fetchIntervalsActivityStreams(activity.externalId);
+    const streams = await fetchIntervalsActivityStreams(activity.externalId, credentials);
     const summary = analyseRide(samplesFromStreams(activity.startAt, streams), { ftp });
     if (!summary) return;
     await upsertRideFile({
@@ -81,14 +90,46 @@ async function notifyOwner(user: User, text: string) {
   });
 }
 
-// Runs after each scheduler tick: every new workout gets the coach's comment in the app
-// chat and a Telegram notification. Older history is never reviewed retroactively.
+// Runs after each scheduler tick: every new workout gets the coach's comment and a
+// Telegram notification — the owner's in JARVIS, each athlete's in the coach bot.
+// Older history is never reviewed retroactively.
 export async function reviewNewWorkoutsIfDue(now = new Date()) {
   if (!canUseOpenAI()) return { reviewed: 0, reason: "no_openai" };
   const [ownerTelegramId] = [...getAllowedTelegramUserIds()];
   const owner = ownerTelegramId ? await getUserByTelegramId(ownerTelegramId) : null;
-  if (!owner) return { reviewed: 0, reason: "owner_unknown" };
+  const ownerResult = owner
+    ? await reviewForUser({ user: owner, now, notify: (text) => notifyOwner(owner, text) })
+    : { reviewed: 0, reason: "owner_unknown" };
 
+  let athletesReviewed = 0;
+  if (isAthleteBotConfigured()) {
+    for (const { connection, user } of await listConnectedAthletes()) {
+      try {
+        const result = await reviewForUser({
+          user,
+          now,
+          credentials: athleteIntervalsCredentials(connection),
+          notify: (text) => sendAthleteMarkdown(user.telegramUserId, text),
+        });
+        athletesReviewed += result.reviewed;
+      } catch (error) {
+        logger.warn("Athlete workout review failed", {
+          userId: user.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+  return { ...ownerResult, athletesReviewed };
+}
+
+async function reviewForUser(params: {
+  user: User;
+  now: Date;
+  credentials?: IntervalsCredentials;
+  notify: (text: string) => Promise<unknown>;
+}) {
+  const { user: owner, now, notify } = params;
   const pending = await listActivitiesAwaitingCoach(
     owner.id,
     new Date(now.getTime() - LOOKBACK_MS),
@@ -109,8 +150,15 @@ export async function reviewNewWorkoutsIfDue(now = new Date()) {
   if (!activities.length) return { reviewed: 0, reason: "claimed_elsewhere" };
 
   const profile = await getCoachProfile(owner.id);
-  const ftp = coachFtp(profile?.settings);
-  for (const activity of activities) await storePowerDetails(owner, activity, ftp);
+  // An athlete without a known FTP gets no IF/TSS: invented zones are worse than none.
+  const ftp = isAthlete(owner)
+    ? athleteFtp(profile?.settings, activities)
+    : coachFtp(profile?.settings);
+  if (ftp) {
+    for (const activity of activities) {
+      await storePowerDetails(owner, activity, ftp, params.credentials);
+    }
+  }
 
   const lines = activities.map((activity) => describe(activity, owner.timezone));
   await insertCoachMessage({
@@ -123,13 +171,17 @@ export async function reviewNewWorkoutsIfDue(now = new Date()) {
     const review = await generateCoachReply(owner, now, AUTO_REVIEW_INSTRUCTION, {
       claudeModel: getEnv().CLAUDE_REVIEW_MODEL,
     });
-    await notifyOwner(owner, coachNotificationExcerpt(review));
+    // The owner reads the full review in the app; an athlete has only the bot chat.
+    await notify(
+      isAthlete(owner) ? `🏋️ **Разбор тренировки**\n\n${review}` : coachNotificationExcerpt(review),
+    );
   } catch (error) {
     logger.warn("Automatic coach review failed", {
+      userId: owner.id,
       error: error instanceof Error ? error.message : String(error),
     });
-    // The owner still hears about the workout, just without the coach's comment.
-    await notifyOwner(owner, `Новые тренировки:\n${lines.join("\n")}`).catch(() => undefined);
+    // The athlete still hears about the workout, just without the coach's comment.
+    await notify(`Новые тренировки:\n${lines.join("\n")}`).catch(() => undefined);
   }
   return { reviewed: activities.length };
 }

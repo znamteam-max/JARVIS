@@ -36,9 +36,30 @@ export const users = assistantTable(
     isOnboarded: boolean("is_onboarded").notNull().default(false),
     quietHoursStart: text("quiet_hours_start").notNull().default("00:00"),
     quietHoursEnd: text("quiet_hours_end").notNull().default("07:30"),
+    // owner = the planner's owner (main bot, app); athlete = only the coach bot.
+    role: text("role").notNull().default("owner"),
     ...timestamps,
   },
   (table) => [uniqueIndex("users_telegram_user_id_uq").on(table.telegramUserId)],
+);
+
+// A person using the separate coach bot: asked → approved by the owner in the main bot;
+// their own Intervals.icu key (encrypted) feeds their workouts and recovery.
+export const athleteConnections = assistantTable(
+  "athlete_connections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    telegramUserId: bigint("telegram_user_id", { mode: "bigint" }).notNull(),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    // pending | approved | denied
+    status: text("status").notNull().default("pending"),
+    telegramUsername: text("telegram_username"),
+    firstName: text("first_name"),
+    intervalsAthleteId: text("intervals_athlete_id"),
+    intervalsApiKey: text("intervals_api_key"),
+    ...timestamps,
+  },
+  (table) => [uniqueIndex("athlete_connections_telegram_user_uq").on(table.telegramUserId)],
 );
 
 export const telegramMessages = assistantTable(
@@ -768,6 +789,7 @@ export const stravaActivities = assistantTable(
 );
 
 export type User = typeof users.$inferSelect;
+export type AthleteConnection = typeof athleteConnections.$inferSelect;
 export type PlannerItem = typeof plannerItems.$inferSelect;
 export type Reminder = typeof reminders.$inferSelect;
 export type ReminderPolicy = typeof reminderPolicies.$inferSelect;

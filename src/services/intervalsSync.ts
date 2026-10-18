@@ -11,11 +11,13 @@ import {
   upsertFitnessActivities,
   upsertWellnessDays,
 } from "@/db/queries/fitness";
+import { listConnectedAthletes } from "@/db/queries/athletes";
 import { getUserByTelegramId } from "@/db/queries/users";
-import type { User } from "@/db/schema";
+import type { AthleteConnection, User } from "@/db/schema";
 import { mapIntervalsActivity, mapIntervalsWellness } from "@/domain/intervalsFitness";
 import { formatActivityCard, selectActivitiesToAnnounce } from "@/domain/stravaActivity";
-import { fetchIntervals } from "@/integrations/intervals";
+import { decryptSecret } from "@/integrations/encryption";
+import { fetchIntervals, type IntervalsCredentials } from "@/integrations/intervals";
 import { getAllowedTelegramUserIds, isIntervalsConfigured } from "@/lib/env";
 import { logger } from "@/lib/logger";
 
@@ -51,17 +53,58 @@ export async function syncIntervalsIfDue(now = new Date()) {
   }
 }
 
-export async function syncIntervalsForUser(params: { user: User; now: Date; announce: boolean }) {
-  const { user, now } = params;
+// The coach bot's athletes, each with their own Intervals.icu key and sync clock.
+export async function syncAthletesIntervalsIfDue(now = new Date()) {
+  let synced = 0;
+  for (const { connection, user } of await listConnectedAthletes()) {
+    const key = `${SYNC_KEY}:${user.id}`;
+    const state = await getIntegrationSyncState(key);
+    if (now.getTime() - (state?.lastSyncAt?.getTime() ?? 0) < SYNC_INTERVAL_MS) continue;
+    try {
+      await syncIntervalsForUser({
+        user,
+        now,
+        announce: false,
+        credentials: athleteIntervalsCredentials(connection),
+      });
+      await setIntegrationSyncState(key, now, null);
+      synced += 1;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn("Athlete Intervals sync failed", { userId: user.id, error: message });
+      await setIntegrationSyncState(key, now, message);
+    }
+  }
+  return { athletes: synced };
+}
+
+export function athleteIntervalsCredentials(connection: AthleteConnection): IntervalsCredentials {
+  if (!connection.intervalsAthleteId || !connection.intervalsApiKey) {
+    throw new Error("intervals_not_connected");
+  }
+  return {
+    athleteId: connection.intervalsAthleteId,
+    apiKey: decryptSecret(connection.intervalsApiKey),
+  };
+}
+
+export async function syncIntervalsForUser(params: {
+  user: User;
+  now: Date;
+  announce: boolean;
+  credentials?: IntervalsCredentials;
+}) {
+  const { user, now, credentials } = params;
   const local = DateTime.fromJSDate(now, { zone: "utc" }).setZone(user.timezone);
   const latest = await getLatestFitnessActivityStart(user.id, INTERVALS_SOURCE);
   const oldest = latest
     ? DateTime.fromJSDate(latest, { zone: "utc" }).setZone(user.timezone).minus({ days: 1 })
     : local.minus({ days: INITIAL_HISTORY_DAYS });
-  const rawActivities = await fetchIntervals("activities", {
-    oldest: oldest.toISODate() ?? "",
-    newest: local.toISODate() ?? "",
-  });
+  const rawActivities = await fetchIntervals(
+    "activities",
+    { oldest: oldest.toISODate() ?? "", newest: local.toISODate() ?? "" },
+    credentials,
+  );
   const rows = rawActivities
     .map((raw) => mapIntervalsActivity(raw, user.timezone))
     .filter((row) => row !== null);
@@ -83,10 +126,14 @@ export async function syncIntervalsForUser(params: { user: User; now: Date; anno
   }
   await markAllFitnessActivitiesNotified(user.id, now);
 
-  const rawWellness = await fetchIntervals("wellness", {
-    oldest: local.minus({ days: WELLNESS_DAYS }).toISODate() ?? "",
-    newest: local.toISODate() ?? "",
-  });
+  const rawWellness = await fetchIntervals(
+    "wellness",
+    {
+      oldest: local.minus({ days: WELLNESS_DAYS }).toISODate() ?? "",
+      newest: local.toISODate() ?? "",
+    },
+    credentials,
+  );
   const wellness = await upsertWellnessDays(
     user.id,
     INTERVALS_SOURCE,
