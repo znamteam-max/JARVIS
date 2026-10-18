@@ -11,7 +11,6 @@ import { getUserById } from "@/db/queries/users";
 import type { AthleteConnection, User } from "@/db/schema";
 import { encryptSecret } from "@/integrations/encryption";
 import { fetchIntervals, IntervalsApiError } from "@/integrations/intervals";
-import { getEnv } from "@/lib/env";
 import { UserFacingError } from "@/lib/errors";
 import { logger } from "@/lib/logger";
 import { generateCoachReply, guardCoachDailyLimit, uploadRideToCoach } from "@/services/coach";
@@ -19,7 +18,13 @@ import { buildCoachChatExport } from "@/services/coachExport";
 import { syncIntervalsForUser } from "@/services/intervalsSync";
 
 import { askOwnerForAthleteAccess, ATHLETE_WELCOME } from "./access";
-import { athleteBotApi, keepTyping, sendAthleteMarkdown, sendAthleteText } from "./telegram";
+import {
+  athleteBotApi,
+  athleteBotToken,
+  keepTyping,
+  sendAthleteMarkdown,
+  sendAthleteText,
+} from "./telegram";
 
 const MAX_FIT_BYTES = 8 * 1024 * 1024;
 
@@ -139,7 +144,7 @@ async function reviewFitFile(user: User, message: TelegramMessage) {
   try {
     const file = await athleteBotApi().getFile(document.file_id);
     const response = await fetch(
-      `https://api.telegram.org/file/bot${getEnv().ATHLETE_BOT_TOKEN}/${file.file_path}`,
+      `https://api.telegram.org/file/bot${athleteBotToken()}/${file.file_path}`,
     );
     if (!response.ok) throw new Error(`telegram_file_${response.status}`);
     const messages = await uploadRideToCoach({

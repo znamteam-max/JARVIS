@@ -42,6 +42,8 @@ const envSchema = z.object({
   ATHLETE_COACH_MODEL: z.string().optional(),
   // The separate coach bot (e.g. @anfisakrasotka_strava_bot); unset = no coach bot.
   ATHLETE_BOT_TOKEN: z.string().optional(),
+  // The same token under the name the owner gave it in Vercel.
+  ANFISAKRASOTKA_BOT_TOKEN: z.string().optional(),
   // Claude Code on the owner's Max subscription in a Cloudflare container.
   CLAUDE_RELAY_URL: z.string().url().optional(),
   CLAUDE_RELAY_TOKEN: z.string().optional(),

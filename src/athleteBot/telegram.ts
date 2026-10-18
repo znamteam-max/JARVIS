@@ -10,19 +10,24 @@ import { logger } from "@/lib/logger";
 // from the owner's JARVIS bot.
 let api: Api | null = null;
 
+export function athleteBotToken() {
+  const env = getEnv();
+  return env.ATHLETE_BOT_TOKEN || env.ANFISAKRASOTKA_BOT_TOKEN || null;
+}
+
 export function isAthleteBotConfigured() {
-  return Boolean(getEnv().ATHLETE_BOT_TOKEN);
+  return Boolean(athleteBotToken());
 }
 
 export function athleteBotApi() {
-  const token = getEnv().ATHLETE_BOT_TOKEN;
+  const token = athleteBotToken();
   if (!token) throw new Error("athlete_bot_not_configured");
   api ??= new Api(token);
   return api;
 }
 
 // Telegram echoes this in every webhook call; derived from the token, so no extra secret.
-export function athleteWebhookSecret(token = getEnv().ATHLETE_BOT_TOKEN ?? "") {
+export function athleteWebhookSecret(token = athleteBotToken() ?? "") {
   return createHash("sha256").update(`jarvis-athlete-webhook:${token}`).digest("hex").slice(0, 64);
 }
 
