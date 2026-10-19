@@ -127,6 +127,20 @@
       "when": 1792684800000,
       "tag": "0017_athletes",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1792771200000,
+      "tag": "0018_projects",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1792857600000,
+      "tag": "0019_project_session_reports",
+      "breakpoints": true
     }
   ]
 }

@@ -18,9 +18,11 @@ import {
 } from "@/domain/foodEdit";
 import type { MiniAppSummary } from "@/services/miniappSummary";
 
+import { confirmAction } from "./confirmAction";
 import styles from "./miniapp.module.css";
+import { ProjectsTab } from "./ProjectsTab";
 
-type Tab = "today" | "plan" | "food" | "fitness" | "coach";
+type Tab = "today" | "plan" | "projects" | "food" | "fitness" | "coach";
 type Mode = "telegram" | "browser";
 type InstallPrompt = Event & { prompt(): Promise<void> };
 type TelegramWebApp = {
@@ -32,6 +34,7 @@ type TelegramWebApp = {
   addToHomeScreen?(): void;
   showConfirm?(message: string, callback: (confirmed: boolean) => void): void;
   isVersionAtLeast?(version: string): boolean;
+  openLink?(url: string): void;
 };
 declare global {
   interface Window {
@@ -150,7 +153,7 @@ export function MiniApp() {
     setMode(app?.initData ? "telegram" : "browser");
     // "Открыть разбор" in the coach's notification opens /app?tab=coach.
     const wanted = new URLSearchParams(window.location.search).get("tab");
-    if (wanted && ["today", "plan", "food", "fitness", "coach"].includes(wanted)) {
+    if (wanted && ["today", "plan", "projects", "food", "fitness", "coach"].includes(wanted)) {
       setTab(wanted as Tab);
     }
     void call("/api/miniapp/summary");
@@ -207,6 +210,7 @@ export function MiniApp() {
           />
         ) : null}
         {summary && tab === "plan" ? <PlanTab summary={summary} call={call} busy={busy} /> : null}
+        {summary && tab === "projects" ? <ProjectsTab api={api} /> : null}
         {summary && tab === "food" ? <FoodTab summary={summary} busy={busy} call={call} /> : null}
         {summary && tab === "coach" ? (
           <CoachTab
@@ -224,6 +228,7 @@ export function MiniApp() {
           [
             ["today", "Сегодня", "M12 4a8 8 0 1 0 0 16a8 8 0 1 0 0-16M12 8v4l3 2"],
             ["plan", "Расписание", "M4 6h16M4 12h16M4 18h10"],
+            ["projects", "Проекты", "M3 7h6l2 2h10v10H3zM3 7V5h6l2 2"],
             ["food", "Питание", "M7 3v8M5 3v5a2 2 0 0 0 4 0V3M7 11v10M17 3c-2 2-2 6 0 8v10"],
             ["fitness", "Тренировки", "M3 12h4l3-7 4 14 3-7h4"],
             ["coach", "JARVIS", "M4 5h16v11H9l-5 4z"],
@@ -1493,21 +1498,6 @@ function FoodAddCard({ busy, call, onDone }: { busy: boolean; call: Call; onDone
 
 // Telegram's own dialog only inside Telegram 6.2+. Outside Telegram its script still
 // defines showConfirm but throws, which silently swallowed every "Удалить" tap.
-function confirmAction(message: string) {
-  return new Promise<boolean>((resolve) => {
-    const app = window.Telegram?.WebApp;
-    if (app?.initData && app.showConfirm && app.isVersionAtLeast?.("6.2")) {
-      try {
-        app.showConfirm(message, resolve);
-        return;
-      } catch {
-        // fall through to the browser dialog
-      }
-    }
-    resolve(window.confirm(message));
-  });
-}
-
 async function removePhoto(call: Call, id: string) {
   if (await confirmAction("Удалить фото? Запись и калории останутся.")) {
     await call(`/api/miniapp/food?id=${id}&what=photo`, { method: "DELETE" });

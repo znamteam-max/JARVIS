@@ -376,13 +376,15 @@
 .tabbar {
   display: flex;
   justify-content: space-around;
-  padding: 6px 8px calc(8px + env(safe-area-inset-bottom));
+  padding: 6px 4px calc(8px + env(safe-area-inset-bottom));
   border-top: 1px solid var(--line);
   background: #13161d;
 }
 
+/* Six tabs: each gets its label's width plus an equal share of the rest, so the long labels
+   («Расписание», «Тренировки») still fit a 320px screen. */
 .tab {
-  min-width: 64px;
+  flex: 1 1 auto;
   min-height: 48px;
   background: none;
   border: none;
@@ -769,4 +771,77 @@
   font-size: 14px;
   line-height: 1.5;
   margin: 0;
+}
+
+/* Projects */
+.projectCard {
+  composes: card;
+  border: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  gap: 6px;
+}
+
+.projectLine {
+  font-size: 14px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.projectSummary {
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.textarea {
+  composes: input;
+  min-height: 88px;
+  padding: 10px 12px;
+  line-height: 1.4;
+  resize: vertical;
+}
+
+.statusPill {
+  flex: none;
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.status_active {
+  composes: statusPill;
+  background: rgba(95, 211, 164, 0.16);
+  color: var(--ok);
+}
+
+.status_waiting {
+  composes: statusPill;
+  background: rgba(242, 179, 61, 0.16);
+  color: var(--accent);
+}
+
+.status_paused {
+  composes: statusPill;
+  background: var(--surface2);
+  color: var(--muted);
+}
+
+.status_done {
+  composes: statusPill;
+  background: rgba(106, 174, 245, 0.16);
+  color: var(--protein);
+}
+
+.warnText {
+  font-size: 13px;
+  color: var(--fat);
+}
+
+.inlineLink {
+  color: var(--accent);
+  text-decoration: none;
 }

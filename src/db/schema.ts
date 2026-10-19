@@ -960,3 +960,99 @@ export const nutritionGoals = assistantTable("nutrition_goals", {
   workoutPercent: integer("workout_percent").notNull().default(50),
   ...timestamps,
 });
+
+// Everything the owner has in progress: what it is, where it stands, what is next.
+export const projects = assistantTable(
+  "projects",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    // active | waiting | paused | done
+    status: text("status").notNull().default("active"),
+    // Who or what the project waits for while status = waiting.
+    waitingFor: text("waiting_for"),
+    // "Where it stands" in a few lines; written by hand now, by the model later.
+    summary: text("summary"),
+    // owner/name on GitHub, so commits and Claude Code reports find the project.
+    repo: text("repo"),
+    lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default(emptyJson),
+    ...timestamps,
+  },
+  (table) => [
+    index("projects_user_activity_idx").on(table.userId, table.lastActivityAt),
+    uniqueIndex("projects_user_repo_uq")
+      .on(table.userId, table.repo)
+      .where(sql`${table.repo} is not null`),
+  ],
+);
+
+// The project's log: done = already happened, todo = ahead (closed once done), note = context.
+export const projectEntries = assistantTable(
+  "project_entries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    // done | todo | note
+    kind: text("kind").notNull(),
+    text: text("text").notNull(),
+    // manual | github | claude_code | ai
+    source: text("source").notNull().default("manual"),
+    // A commit sha or a session id: the same report never lands twice.
+    externalId: text("external_id"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
+    // Set when a todo is done.
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default(emptyJson),
+    ...timestamps,
+  },
+  (table) => [
+    index("project_entries_project_occurred_idx").on(table.projectId, table.occurredAt),
+    uniqueIndex("project_entries_source_external_uq")
+      .on(table.projectId, table.source, table.externalId)
+      .where(sql`${table.externalId} is not null`),
+  ],
+);
+
+// The latest report of one Claude Code session, waiting to become log lines. The raw text
+// is dropped once processed; done/next keep what the session has reported so far.
+export const projectSessionReports = assistantTable(
+  "project_session_reports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    sessionId: text("session_id").notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>(),
+    payloadHash: text("payload_hash").notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    processedHash: text("processed_hash"),
+    processedAt: timestamp("processed_at", { withTimezone: true }),
+    done: text("done"),
+    next: jsonb("next").$type<string[]>().notNull().default(emptyArrayJson),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("project_session_reports_user_session_uq").on(table.userId, table.sessionId),
+    index("project_session_reports_received_idx").on(table.receivedAt),
+  ],
+);
+
+export type Project = typeof projects.$inferSelect;
+export type ProjectEntry = typeof projectEntries.$inferSelect;
+export type ProjectSessionReport = typeof projectSessionReports.$inferSelect;
