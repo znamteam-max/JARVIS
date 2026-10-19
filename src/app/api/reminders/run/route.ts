@@ -3,6 +3,7 @@ import { after, NextResponse } from "next/server";
 import { runDueReminders } from "@/jobs/runDueReminders";
 import { reviewNewWorkoutsIfDue } from "@/services/coachReviews";
 import { backfillFoodPhotos } from "@/services/foodPhotos";
+import { syncGithubProjectsIfDue } from "@/services/projectGithubSync";
 import { syncAthletesIntervalsIfDue, syncIntervalsIfDue } from "@/services/intervalsSync";
 import { syncStravaIfDue } from "@/services/stravaSync";
 import { requireEnv } from "@/lib/env";
@@ -32,6 +33,14 @@ export async function POST(request: Request) {
   after(() =>
     reviewNewWorkoutsIfDue().catch((error) =>
       logger.warn("Coach review tick failed", {
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    ),
+  );
+  // Projects' commit logs, every 30 minutes; GitHub being slow never delays reminders.
+  after(() =>
+    syncGithubProjectsIfDue().catch((error) =>
+      logger.warn("GitHub projects sync tick failed", {
         error: error instanceof Error ? error.message : String(error),
       }),
     ),

@@ -38,6 +38,8 @@ export type ProjectEntryView = {
   // When it was added; for a closed todo, when it was done.
   at: string;
   closed: boolean;
+  // Where the line came from, e.g. the commit on GitHub.
+  url: string | null;
 };
 
 export type ProjectDetailView = {
@@ -53,6 +55,8 @@ export type ProjectDetailView = {
   // Entries were added or changed after the summary was written.
   summaryStale: boolean;
   repo: string | null;
+  // The last commit sync of a linked repo: when, and what went wrong if it did.
+  github: { syncedAt: string | null; error: string | null } | null;
   lastActivityAt: string;
   // Open todos in the order they were planned.
   ahead: ProjectEntryView[];
@@ -68,7 +72,8 @@ export class ProjectError extends Error {
       | "repo_taken"
       | "invalid_repo"
       | "nothing_to_summarize"
-      | "summary_failed",
+      | "summary_failed"
+      | "no_repo",
   ) {
     super(code);
   }
@@ -131,6 +136,10 @@ function entryView(entry: ProjectEntry): ProjectEntryView {
     source: entry.source,
     at: (entry.closedAt ?? entry.occurredAt).toISOString(),
     closed: entry.closedAt !== null,
+    url:
+      typeof entry.metadata?.url === "string" && /^https:\/\//.test(entry.metadata.url)
+        ? entry.metadata.url
+        : null,
   };
 }
 
@@ -164,6 +173,16 @@ export function buildProjectDetail(project: Project, entries: ProjectEntry[]): P
     summary: project.summary,
     ...summaryProvenance(project, entries),
     repo: project.repo,
+    github: project.repo
+      ? {
+          syncedAt:
+            typeof project.metadata?.githubSyncedAt === "string"
+              ? project.metadata.githubSyncedAt
+              : null,
+          error:
+            typeof project.metadata?.githubError === "string" ? project.metadata.githubError : null,
+        }
+      : null,
     lastActivityAt: project.lastActivityAt.toISOString(),
     ahead: views
       .filter((entry) => entry.kind === "todo" && !entry.closed)

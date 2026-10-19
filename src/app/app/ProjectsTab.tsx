@@ -48,6 +48,14 @@ const ERRORS: Record<string, string> = {
   invalid: "Проверь поля: у проекта должно быть название.",
   nothing_to_summarize: "Сначала запиши хотя бы один шаг — из пустого журнала сводку не собрать.",
   summary_failed: "JARVIS сейчас не смог написать сводку. Попробуй через минуту.",
+  no_repo: "Сначала привяжи репозиторий: «Изменить» → GitHub.",
+};
+
+const GITHUB_ERRORS: Record<string, string> = {
+  repo_not_found: "GitHub не видит репозиторий: проверь название или доступ токена.",
+  bad_token: "GitHub не принял токен — обнови GITHUB_TOKEN в настройках Vercel.",
+  rate_limited: "GitHub временно ограничил запросы — подтяну коммиты позже.",
+  github_failed: "GitHub не ответил — подтяну коммиты позже.",
 };
 
 const DONE_PREVIEW = 8;
@@ -60,6 +68,23 @@ function errorText(body: Record<string, unknown> | null) {
 
 function json(method: string, body: unknown): RequestInit {
   return { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
+}
+
+// Inside Telegram a link opens in its browser; elsewhere in a new tab.
+function openExternal(event: React.MouseEvent<HTMLAnchorElement>) {
+  const app = window.Telegram?.WebApp;
+  if (app?.initData && app.openLink) {
+    event.preventDefault();
+    app.openLink(event.currentTarget.href);
+  }
+}
+
+// "сегодня в 14:05" for a sync time; the plain day otherwise.
+function agoTime(iso: string) {
+  const day = ago(iso);
+  return day === "сегодня"
+    ? `сегодня в ${new Date(iso).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}`
+    : day;
 }
 
 // "сегодня", "вчера", "3 дн. назад", then a plain date.
@@ -306,6 +331,7 @@ function ProjectDetail({
   const [editingSummary, setEditingSummary] = useState(false);
   const [showAllDone, setShowAllDone] = useState(false);
   const [summarizing, setSummarizing] = useState(false);
+  const [syncing, setSyncing] = useState(false);
 
   const show = useCallback((body: Record<string, unknown> | null) => {
     if (body?.ok && body.project) {
@@ -332,6 +358,12 @@ function ProjectDetail({
   }, [api, id, show]);
 
   const patch = (fields: Record<string, unknown>) => run(json("PATCH", { id, ...fields }));
+
+  async function syncGithub() {
+    setSyncing(true);
+    await run(json("POST", { action: "github_sync", projectId: id }));
+    setSyncing(false);
+  }
 
   async function summarize() {
     setEditingSummary(false);
@@ -384,6 +416,25 @@ function ProjectDetail({
             </span>
             <h1 className={styles.title}>{project.title}</h1>
           </div>
+          {project.github ? (
+            <div className={styles.header}>
+              <span className={project.github.error ? styles.warnText : styles.caption}>
+                {project.github.error
+                  ? (GITHUB_ERRORS[project.github.error] ?? GITHUB_ERRORS.github_failed)
+                  : project.github.syncedAt
+                    ? `GitHub: коммиты подтянуты ${agoTime(project.github.syncedAt)}`
+                    : "GitHub: коммиты ещё не подтягивались"}
+              </span>
+              <button
+                type="button"
+                className={styles.linkButton}
+                disabled={busy}
+                onClick={() => void syncGithub()}
+              >
+                {syncing ? "Подтягиваю…" : "Обновить"}
+              </button>
+            </div>
+          ) : null}
           {editing ? (
             <ProjectEditForm
               project={project}
@@ -599,6 +650,20 @@ function EntryRow({
       <span className={styles.detail}>
         {ago(entry.at)}
         {source ? ` · ${source}` : ""}
+        {entry.url ? (
+          <>
+            {" · "}
+            <a
+              className={styles.inlineLink}
+              href={entry.url}
+              target="_blank"
+              rel="noreferrer"
+              onClick={openExternal}
+            >
+              открыть
+            </a>
+          </>
+        ) : null}
       </span>
       {editing ? (
         <div className={styles.editItem}>

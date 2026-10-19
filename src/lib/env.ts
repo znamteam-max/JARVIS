@@ -49,6 +49,11 @@ const envSchema = z.object({
   CLAUDE_RELAY_TOKEN: z.string().optional(),
   CLAUDE_CHAT_MODEL: z.string().default("opus"),
   CLAUDE_REVIEW_MODEL: z.string().default("opus"),
+  // Read-only GitHub tokens for the projects' commit log. A fine-grained token covers one
+  // owner, so GITHUB_TOKENS maps owners to their tokens: "RNGN-Autopost=github_pat_...;...".
+  // GITHUB_TOKEN is used for every other owner; public repos work without any token.
+  GITHUB_TOKEN: z.string().optional(),
+  GITHUB_TOKENS: z.string().optional(),
   MEDIA_WORKER_URL: z.string().url().optional(),
   MEDIA_WORKER_TOKEN: z.string().optional(),
   CALENDAR_PROVIDER: z.enum(["none", "google", "yandex"]).default("none"),

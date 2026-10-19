@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 
 import { getDb } from "../client";
 import { projectEntries, projects, type ProjectEntry } from "../schema";
@@ -9,6 +9,15 @@ export async function listProjects(userId: string) {
     .from(projects)
     .where(eq(projects.userId, userId))
     .orderBy(desc(projects.lastActivityAt));
+}
+
+// Every project linked to a GitHub repo and not finished: the commit sync's work list.
+export async function listProjectsWithRepo() {
+  return getDb()
+    .select()
+    .from(projects)
+    .where(and(isNotNull(projects.repo), ne(projects.status, "done")))
+    .orderBy(projects.lastActivityAt);
 }
 
 export async function getProject(userId: string, projectId: string) {
@@ -121,9 +130,7 @@ export async function listProjectSnapshots(userId: string, projectIds: string[])
   return { openTodos, lastDone };
 }
 
-// An entry with an externalId that is already stored (the same commit, the same session
-// report) is skipped: returns null.
-export async function insertProjectEntry(params: {
+type NewProjectEntry = {
   userId: string;
   projectId: string;
   kind: string;
@@ -132,14 +139,32 @@ export async function insertProjectEntry(params: {
   externalId?: string | null;
   occurredAt?: Date;
   metadata?: Record<string, unknown>;
-}): Promise<ProjectEntry | null> {
-  const [row] = await getDb()
+};
+
+// An entry with an externalId that is already stored (the same commit, the same session
+// report) is skipped: returns null.
+export async function insertProjectEntry(params: NewProjectEntry): Promise<ProjectEntry | null> {
+  const [row] = await insertProjectEntries(params.userId, params.projectId, [params]);
+  return row ?? null;
+}
+
+// Many lines of one project in one statement; returns only the ones actually stored.
+export async function insertProjectEntries(
+  userId: string,
+  projectId: string,
+  rows: Array<Omit<NewProjectEntry, "userId" | "projectId">>,
+) {
+  if (rows.length === 0) return [];
+  const inserted = await getDb()
     .insert(projectEntries)
-    .values({ ...params, metadata: params.metadata ?? {} })
+    .values(rows.map((row) => ({ ...row, userId, projectId, metadata: row.metadata ?? {} })))
     .onConflictDoNothing()
     .returning();
-  if (row) await touchProject(params.userId, params.projectId);
-  return row ?? null;
+  if (inserted.length) {
+    const latest = Math.max(...inserted.map((row) => row.occurredAt.getTime()));
+    await touchProject(userId, projectId, new Date(latest));
+  }
+  return inserted;
 }
 
 export async function updateProjectEntry(
@@ -171,9 +196,13 @@ export async function deleteProjectEntry(userId: string, entryId: string) {
   return row ?? null;
 }
 
-async function touchProject(userId: string, projectId: string) {
+// "Updated" follows the latest real step: importing old commits does not make a project
+// look fresh.
+async function touchProject(userId: string, projectId: string, at = new Date()) {
   await getDb()
     .update(projects)
-    .set({ lastActivityAt: new Date() })
+    .set({
+      lastActivityAt: sql`greatest(${projects.lastActivityAt}, ${at.toISOString()}::timestamptz)`,
+    })
     .where(and(eq(projects.userId, userId), eq(projects.id, projectId)));
 }

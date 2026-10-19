@@ -34,6 +34,7 @@ type TelegramWebApp = {
   addToHomeScreen?(): void;
   showConfirm?(message: string, callback: (confirmed: boolean) => void): void;
   isVersionAtLeast?(version: string): boolean;
+  openLink?(url: string): void;
 };
 declare global {
   interface Window {

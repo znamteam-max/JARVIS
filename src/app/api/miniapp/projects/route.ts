@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { resolveMiniAppOwner } from "@/lib/telegramWebApp";
+import { syncProjectCommitsNow } from "@/services/projectGithubSync";
 import { summarizeProject } from "@/services/projectSummary";
 import {
   addProjectEntryFromApp,
@@ -46,6 +47,19 @@ const summarizeSchema = z.object({
   action: z.literal("summarize"),
   projectId: z.string().uuid(),
 });
+
+const githubSyncSchema = z.object({
+  action: z.literal("github_sync"),
+  projectId: z.string().uuid(),
+});
+
+// A freshly linked repo shows its commits right away; GitHub trouble is shown on the card.
+async function withCommits<T extends { id: string; repo: string | null }>(
+  userId: string,
+  project: T,
+) {
+  return project.repo ? syncProjectCommitsNow(userId, project.id) : project;
+}
 
 const projectPatchSchema = z.object({
   id: z.string().uuid(),
@@ -94,7 +108,8 @@ export async function GET(request: Request) {
 }
 
 // {action: "create"} a new project; {action: "entry"} adds a done / todo / note line;
-// {action: "summarize"} has JARVIS rewrite "где остановился" from the log.
+// {action: "summarize"} has JARVIS rewrite "где остановился" from the log;
+// {action: "github_sync"} pulls the linked repo's latest commits now.
 export async function POST(request: Request) {
   const owner = await resolveMiniAppOwner(request);
   if (!owner) return unauthorized();
@@ -114,7 +129,7 @@ export async function POST(request: Request) {
       return NextResponse.json({
         ok: true,
         message: `Добавил проект «${project.title}».`,
-        project,
+        project: await withCommits(owner.id, project),
       });
     }
     const entry = entrySchema.safeParse(raw);
@@ -130,6 +145,13 @@ export async function POST(request: Request) {
       return NextResponse.json({
         ok: true,
         project: await summarizeProject({ user: owner, projectId: summarize.data.projectId }),
+      });
+    }
+    const githubSync = githubSyncSchema.safeParse(raw);
+    if (githubSync.success) {
+      return NextResponse.json({
+        ok: true,
+        project: await syncProjectCommitsNow(owner.id, githubSync.data.projectId),
       });
     }
   } catch (error) {
@@ -154,9 +176,11 @@ export async function PATCH(request: Request) {
     const project = projectPatchSchema.safeParse(raw);
     if (project.success) {
       const { id, ...fields } = project.data;
+      const updated = await updateProjectFromApp({ userId: owner.id, projectId: id, ...fields });
       return NextResponse.json({
         ok: true,
-        project: await updateProjectFromApp({ userId: owner.id, projectId: id, ...fields }),
+        // Linking (or relinking) a repo pulls its commits at once.
+        project: fields.repo ? await withCommits(owner.id, updated) : updated,
       });
     }
   } catch (error) {

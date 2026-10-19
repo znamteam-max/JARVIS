@@ -835,3 +835,13 @@
   background: rgba(106, 174, 245, 0.16);
   color: var(--protein);
 }
+
+.warnText {
+  font-size: 13px;
+  color: var(--fat);
+}
+
+.inlineLink {
+  color: var(--accent);
+  text-decoration: none;
+}
