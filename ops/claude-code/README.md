@@ -18,8 +18,11 @@ How it flows:
    (`CLAUDE_REPORT_MODEL`, OpenAI as the fallback) what is done so far and what is next,
    and writes the log lines. The raw text is deleted once processed.
 
-Only git projects report. A folder opts out with an empty `.jarvis-ignore` file in the
-repo root. Obvious secrets (API keys, tokens, `Bearer …`, `*_TOKEN=…`, database URLs) are
+Only git projects report. Work projects never do: anything whose folder, GitHub owner or
+repo name starts with `RNGN` (any case) is skipped before the transcript is even read, and
+this cannot be turned off from the config. More patterns can be added to the config's
+`exclude` list (`*` is any text), and a folder can also opt out with an empty
+`.jarvis-ignore` file in the repo root. Obvious secrets (API keys, tokens, `Bearer …`, `*_TOKEN=…`, database URLs) are
 replaced with `[redacted]` before anything is stored or sent to a model.
 
 ## Set up
@@ -32,7 +35,8 @@ replaced with `[redacted]` before anything is stored or sent to a model.
    ```json
    {
      "url": "https://znambo-telegram-assistant-eta.vercel.app",
-     "token": "<the same PROJECT_REPORT_TOKEN>"
+     "token": "<the same PROJECT_REPORT_TOKEN>",
+     "exclude": []
    }
    ```
 

@@ -117,10 +117,7 @@ describe("the GitHub repo field", () => {
   it.each([
     ["znamteam-max/JARVIS", "znamteam-max/JARVIS"],
     ["https://github.com/znamteam-max/JARVIS.git", "znamteam-max/JARVIS"],
-    [
-      "github.com/RNGN-Autopost/Bolshe-Autopost-Frontend/",
-      "RNGN-Autopost/Bolshe-Autopost-Frontend",
-    ],
+    ["github.com/some-org/Some-Project/", "some-org/Some-Project"],
     ["  ", null],
     [null, null],
   ])("%s → %s", (raw, expected) => {

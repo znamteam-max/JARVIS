@@ -6,8 +6,10 @@ import { basename, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
+  ALWAYS_EXCLUDED,
   buildReport,
   cleanUserText,
+  isExcluded,
   lastTurn,
   repoFromRemote,
 } from "../../ops/claude-code/jarvis-report.mjs";
@@ -62,14 +64,8 @@ describe("the turn the hook reports", () => {
 describe("the repo a session works in", () => {
   it.each([
     ["https://github.com/znamteam-max/JARVIS.git", "znamteam-max/JARVIS"],
-    [
-      "git@github.com:RNGN-Autopost/Bolshe-Autopost-Frontend.git",
-      "RNGN-Autopost/Bolshe-Autopost-Frontend",
-    ],
-    [
-      "https://github.com/RNGN-Home-of-Hockey/BOLSHE-Live-Center",
-      "RNGN-Home-of-Hockey/BOLSHE-Live-Center",
-    ],
+    ["git@github.com:some-org/Some-Project.git", "some-org/Some-Project"],
+    ["https://github.com/other-org/Another-Project", "other-org/Another-Project"],
     ["https://gitlab.com/a/b.git", null],
     [null, null],
   ])("%s → %s", (remote, repo) => {
@@ -119,5 +115,53 @@ describe("the report the hook would send", () => {
     writeFileSync(join(root, ".jarvis-ignore"), "");
     expect(buildReport({ session_id: "s1", transcript_path: "t", cwd: root }, read)).toBeNull();
     rmSync(join(root, ".jarvis-ignore"));
+  });
+
+  it("an RNGN repo is skipped before its transcript is even read", () => {
+    git("remote", "set-url", "origin", "https://github.com/RNGN-Home-of-Hockey/BOLSHE-Live-Center");
+    const reads: string[] = [];
+    const tracked = (path: string) => {
+      reads.push(path);
+      return read();
+    };
+    try {
+      expect(
+        buildReport({ session_id: "s1", transcript_path: "t", cwd: root }, tracked),
+      ).toBeNull();
+      // Even an empty config list keeps the default.
+      expect(
+        buildReport({ session_id: "s1", transcript_path: "t", cwd: root }, tracked, [
+          ...ALWAYS_EXCLUDED,
+        ]),
+      ).toBeNull();
+      expect(reads).toEqual([]);
+    } finally {
+      git("remote", "set-url", "origin", "git@github.com:znamteam-max/JARVIS.git");
+    }
+  });
+});
+
+describe("which projects never report", () => {
+  it.each([
+    ["RNGN-Autopost/Bolshe-Autopost-Frontend", "Bolshe-Autopost-Frontend"],
+    ["RNGN-Home-of-Hockey/HOH_NHL_Daily_Results", "HOH_NHL_Daily_Results-epl"],
+    ["znamteam-max/RNGN-HoH-Highlights", "RNGN-HoH-Highlights-nba"],
+    [null, "RNGN_STUDIO"],
+    [null, "rngn-local"],
+  ])("RNGN work: %s in %s", (repo, folder) => {
+    expect(isExcluded(ALWAYS_EXCLUDED, { repo, folder })).toBe(true);
+  });
+
+  it.each([
+    ["znamteam-max/JARVIS", "JARVIS"],
+    ["znamteam-max/TENNIS-Scores_daily_results", "TENNIS-Scores_daily_results"],
+    [null, "ZNAMBO-Calls"],
+  ])("own projects still report: %s in %s", (repo, folder) => {
+    expect(isExcluded(ALWAYS_EXCLUDED, { repo, folder })).toBe(false);
+  });
+
+  it("extra patterns from the config work the same way, dots taken literally", () => {
+    expect(isExcluded(["*-private"], { repo: "me/notes-private", folder: "notes" })).toBe(true);
+    expect(isExcluded(["a.b"], { repo: null, folder: "axb" })).toBe(false);
   });
 });

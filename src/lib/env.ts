@@ -52,7 +52,7 @@ const envSchema = z.object({
   // Turns Claude Code session reports into project log lines.
   CLAUDE_REPORT_MODEL: z.string().default("sonnet"),
   // Read-only GitHub tokens for the projects' commit log. A fine-grained token covers one
-  // owner, so GITHUB_TOKENS maps owners to their tokens: "RNGN-Autopost=github_pat_...;...".
+  // owner, so GITHUB_TOKENS maps owners to their tokens: "some-org=github_pat_...;...".
   // GITHUB_TOKEN is used for every other owner; public repos work without any token.
   GITHUB_TOKEN: z.string().optional(),
   GITHUB_TOKENS: z.string().optional(),

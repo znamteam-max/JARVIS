@@ -11,6 +11,9 @@ import { pathToFileURL } from "node:url";
 const TIMEOUT_MS = 4000;
 const MAX_USER_CHARS = 4000;
 const MAX_ASSISTANT_CHARS = 20000;
+// Never reported, whatever the config says: work projects stay on this computer.
+// Matched against the folder, "owner/name", the owner and the repo name.
+export const ALWAYS_EXCLUDED = ["RNGN*"];
 
 // "https://github.com/owner/name.git" or "git@github.com:owner/name.git" → "owner/name".
 export function repoFromRemote(remote) {
@@ -74,18 +77,36 @@ export function lastTurn(lines) {
   return { userText, assistantText };
 }
 
-// JARVIS_REPORT_URL + JARVIS_REPORT_TOKEN, or ~/.claude/jarvis-report.json {url, token}.
+// "RNGN*" style patterns: * is any text, case is ignored, the whole name must match.
+export function isExcluded(patterns, { repo, folder }) {
+  const [owner, name] = repo ? repo.split("/") : [];
+  const names = [folder, repo, owner, name].filter(Boolean);
+  return patterns.some((pattern) => {
+    const source = pattern
+      .split("*")
+      .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      .join(".*");
+    const regex = new RegExp(`^${source}$`, "i");
+    return names.some((value) => regex.test(value));
+  });
+}
+
+// ~/.claude/jarvis-report.json {url, token, exclude?: ["pattern", ...]}; JARVIS_REPORT_URL and
+// JARVIS_REPORT_TOKEN win over the file's url and token. RNGN* is excluded in any case.
 function readConfig() {
-  const url = process.env.JARVIS_REPORT_URL;
-  const token = process.env.JARVIS_REPORT_TOKEN;
-  if (url && token) return { url, token };
+  let file = null;
   try {
-    const file = JSON.parse(readFileSync(join(homedir(), ".claude", "jarvis-report.json"), "utf8"));
-    if (file?.url && file?.token) return { url: file.url, token: file.token };
+    file = JSON.parse(readFileSync(join(homedir(), ".claude", "jarvis-report.json"), "utf8"));
   } catch {
-    // not set up: reports are off
+    // no file: only the environment can turn reports on
   }
-  return null;
+  const url = process.env.JARVIS_REPORT_URL || file?.url;
+  const token = process.env.JARVIS_REPORT_TOKEN || file?.token;
+  if (!url || !token) return null;
+  const extra = Array.isArray(file?.exclude)
+    ? file.exclude.filter((pattern) => typeof pattern === "string" && pattern.trim())
+    : [];
+  return { url, token, exclude: [...ALWAYS_EXCLUDED, ...extra] };
 }
 
 function git(cwd, args) {
@@ -108,19 +129,27 @@ async function readStdin() {
 }
 
 // The report for one finished turn, or null when there is nothing to send: not a git
-// project, opted out with a .jarvis-ignore file, or no reply text yet.
-export function buildReport(input, readFile = (path) => readFileSync(path, "utf8")) {
+// project, an excluded one (RNGN*, the config's list, a .jarvis-ignore file), or no reply
+// text yet. Exclusion is decided before the transcript is even read.
+export function buildReport(
+  input,
+  readFile = (path) => readFileSync(path, "utf8"),
+  exclude = ALWAYS_EXCLUDED,
+) {
   if (input.stop_hook_active || !input.session_id || !input.transcript_path) return null;
   const root = git(input.cwd || process.cwd(), ["rev-parse", "--show-toplevel"]);
   if (!root || existsSync(join(root, ".jarvis-ignore"))) return null;
+  const repo = repoFromRemote(git(root, ["remote", "get-url", "origin"]));
+  const folder = basename(root);
+  if (isExcluded(exclude, { repo, folder })) return null;
   const { userText, assistantText } = lastTurn(readFile(input.transcript_path).split("\n"));
   if (!assistantText) return null;
   // A branch name even before the first commit; null when detached.
   const branch = git(root, ["symbolic-ref", "--short", "-q", "HEAD"]);
   return {
     sessionId: input.session_id,
-    repo: repoFromRemote(git(root, ["remote", "get-url", "origin"])),
-    folder: basename(root),
+    repo,
+    folder,
     branch: branch || null,
     userMessage: userText ? userText.slice(0, MAX_USER_CHARS) : null,
     assistantMessage: assistantText.slice(-MAX_ASSISTANT_CHARS),
@@ -130,7 +159,7 @@ export function buildReport(input, readFile = (path) => readFileSync(path, "utf8
 async function main() {
   const config = readConfig();
   if (!config) return;
-  const report = buildReport(JSON.parse((await readStdin()) || "{}"));
+  const report = buildReport(JSON.parse((await readStdin()) || "{}"), undefined, config.exclude);
   if (!report) return;
   await fetch(new URL("/api/projects/session-report", config.url), {
     method: "POST",

@@ -102,10 +102,10 @@ describe("which GitHub token a repo uses", () => {
   it("the owner's own token from GITHUB_TOKENS, else GITHUB_TOKEN, else none", () => {
     expect(githubTokenFor("znamteam-max/JARVIS")).toBeNull();
     process.env.GITHUB_TOKEN = "default-token";
-    process.env.GITHUB_TOKENS = "RNGN-Autopost=autopost-token; rngn-home-of-hockey = hockey-token";
+    process.env.GITHUB_TOKENS = "Some-Org=org-token; other-org = other-token";
     resetEnvCacheForTests();
-    expect(githubTokenFor("rngn-autopost/Bolshe-Autopost-Frontend")).toBe("autopost-token");
-    expect(githubTokenFor("RNGN-Home-of-Hockey/BOLSHE-Live-Center")).toBe("hockey-token");
+    expect(githubTokenFor("some-org/Some-Project")).toBe("org-token");
+    expect(githubTokenFor("OTHER-ORG/Another-Project")).toBe("other-token");
     expect(githubTokenFor("znamteam-max/JARVIS")).toBe("default-token");
   });
 });
