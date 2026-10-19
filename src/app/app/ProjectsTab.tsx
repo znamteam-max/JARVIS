@@ -46,6 +46,8 @@ const ERRORS: Record<string, string> = {
   repo_taken: "Этот репозиторий уже привязан к другому проекту.",
   invalid_repo: "Репозиторий — в виде owner/name или ссылкой на GitHub.",
   invalid: "Проверь поля: у проекта должно быть название.",
+  nothing_to_summarize: "Сначала запиши хотя бы один шаг — из пустого журнала сводку не собрать.",
+  summary_failed: "JARVIS сейчас не смог написать сводку. Попробуй через минуту.",
 };
 
 const DONE_PREVIEW = 8;
@@ -303,6 +305,7 @@ function ProjectDetail({
   const [editing, setEditing] = useState(false);
   const [editingSummary, setEditingSummary] = useState(false);
   const [showAllDone, setShowAllDone] = useState(false);
+  const [summarizing, setSummarizing] = useState(false);
 
   const show = useCallback((body: Record<string, unknown> | null) => {
     if (body?.ok && body.project) {
@@ -329,6 +332,13 @@ function ProjectDetail({
   }, [api, id, show]);
 
   const patch = (fields: Record<string, unknown>) => run(json("PATCH", { id, ...fields }));
+
+  async function summarize() {
+    setEditingSummary(false);
+    setSummarizing(true);
+    await run(json("POST", { action: "summarize", projectId: id }));
+    setSummarizing(false);
+  }
 
   async function remove() {
     if (!project) return;
@@ -401,14 +411,33 @@ function ProjectDetail({
           <section className={styles.card} aria-label="Где остановился">
             <div className={styles.header}>
               <h2 className={styles.sectionTitle}>Где остановился</h2>
-              <button
-                type="button"
-                className={styles.linkButton}
-                onClick={() => setEditingSummary((current) => !current)}
-              >
-                {editingSummary ? "Закрыть" : project.summary ? "Изменить" : "Написать"}
-              </button>
+              <span className={styles.rowActions}>
+                {project.summary ||
+                project.ahead.length + project.done.length + project.notes.length ? (
+                  <button
+                    type="button"
+                    className={styles.linkButton}
+                    disabled={busy}
+                    onClick={() => void summarize()}
+                  >
+                    {summarizing ? "Пишу…" : project.summary ? "Обновить" : "Собрать"}
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className={styles.linkButton}
+                  disabled={summarizing}
+                  onClick={() => setEditingSummary((current) => !current)}
+                >
+                  {editingSummary ? "Закрыть" : project.summary ? "Изменить" : "Написать"}
+                </button>
+              </span>
             </div>
+            {summarizing ? (
+              <span className={styles.caption} role="status">
+                JARVIS читает журнал проекта — это может занять до минуты.
+              </span>
+            ) : null}
             {editingSummary ? (
               <SummaryForm
                 value={project.summary}
@@ -418,11 +447,24 @@ function ProjectDetail({
                 }}
               />
             ) : project.summary ? (
-              <span className={styles.projectSummary}>{project.summary}</span>
+              <>
+                <span className={styles.projectSummary}>{project.summary}</span>
+                <span className={styles.detail}>
+                  {project.summaryBy === "ai"
+                    ? `JARVIS${project.summaryModel ? ` · ${project.summaryModel}` : ""}`
+                    : "вручную"}
+                  {project.summaryAt ? ` · ${ago(project.summaryAt)}` : ""}
+                </span>
+                {project.summaryStale && !summarizing ? (
+                  <span className={styles.caption}>
+                    После сводки появились новые записи — нажми «Обновить».
+                  </span>
+                ) : null}
+              </>
             ) : (
               <span className={styles.caption}>
                 Пара строк о том, в каком состоянии проект: что работает, что сломано, на чём
-                остановился.
+                остановился. Напиши сам или нажми «Собрать» — JARVIS сведёт журнал.
               </span>
             )}
           </section>

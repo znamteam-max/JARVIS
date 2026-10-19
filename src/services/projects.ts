@@ -11,6 +11,7 @@ import {
   updateProjectEntry,
 } from "@/db/queries/projects";
 import type { Project, ProjectEntry } from "@/db/schema";
+import { chatModelLabel } from "@/domain/chatModelLabel";
 
 export const PROJECT_STATUSES = ["active", "waiting", "paused", "done"] as const;
 export type ProjectStatus = (typeof PROJECT_STATUSES)[number];
@@ -45,6 +46,12 @@ export type ProjectDetailView = {
   status: ProjectStatus;
   waitingFor: string | null;
   summary: string | null;
+  // Who wrote the summary: the owner or JARVIS (with the model), and when.
+  summaryBy: "ai" | "manual" | null;
+  summaryModel: string | null;
+  summaryAt: string | null;
+  // Entries were added or changed after the summary was written.
+  summaryStale: boolean;
   repo: string | null;
   lastActivityAt: string;
   // Open todos in the order they were planned.
@@ -55,7 +62,14 @@ export type ProjectDetailView = {
 };
 
 export class ProjectError extends Error {
-  constructor(public readonly code: "not_found" | "repo_taken" | "invalid_repo") {
+  constructor(
+    public readonly code:
+      | "not_found"
+      | "repo_taken"
+      | "invalid_repo"
+      | "nothing_to_summarize"
+      | "summary_failed",
+  ) {
     super(code);
   }
 }
@@ -120,6 +134,25 @@ function entryView(entry: ProjectEntry): ProjectEntryView {
   };
 }
 
+function summaryProvenance(project: Project, entries: ProjectEntry[]) {
+  const meta = project.metadata ?? {};
+  const at = typeof meta.summaryAt === "string" ? meta.summaryAt : null;
+  const by: "ai" | "manual" | null =
+    meta.summarySource === "ai" || meta.summarySource === "manual" ? meta.summarySource : null;
+  const changedAfter = at
+    ? entries.some((entry) => entry.updatedAt.getTime() > new Date(at).getTime())
+    : false;
+  return {
+    summaryBy: project.summary ? by : null,
+    summaryModel:
+      project.summary && by === "ai"
+        ? chatModelLabel({ model: meta.summaryModel, fallback: meta.summaryFallback })
+        : null,
+    summaryAt: project.summary ? at : null,
+    summaryStale: Boolean(project.summary) && changedAfter,
+  };
+}
+
 export function buildProjectDetail(project: Project, entries: ProjectEntry[]): ProjectDetailView {
   const views = entries.map(entryView);
   const newestFirst = (a: ProjectEntryView, b: ProjectEntryView) => b.at.localeCompare(a.at);
@@ -129,6 +162,7 @@ export function buildProjectDetail(project: Project, entries: ProjectEntry[]): P
     status: asStatus(project.status),
     waitingFor: project.waitingFor,
     summary: project.summary,
+    ...summaryProvenance(project, entries),
     repo: project.repo,
     lastActivityAt: project.lastActivityAt.toISOString(),
     ahead: views
@@ -218,7 +252,12 @@ export async function updateProjectFromApp(params: {
   if (fields.status && fields.status !== "waiting" && fields.waitingFor === undefined) {
     patch.waitingFor = null;
   }
-  const updated = await guardRepo(() => updateProject(userId, projectId, patch));
+  // A summary typed by hand is the owner's: JARVIS keeps its facts when it rewrites it.
+  const metadata =
+    fields.summary !== undefined
+      ? { summarySource: "manual", summaryAt: new Date().toISOString(), summaryModel: null }
+      : undefined;
+  const updated = await guardRepo(() => updateProject(userId, projectId, patch, { metadata }));
   if (!updated) throw new ProjectError("not_found");
   return getProjectView(userId, projectId);
 }

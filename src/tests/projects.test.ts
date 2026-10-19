@@ -1,10 +1,7 @@
-import { readFileSync } from "node:fs";
-
-import { PGlite } from "@electric-sql/pglite";
-import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
+import type { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import * as schema from "@/db/schema";
+import { createProjectsTestDb } from "./helpers/projectsTestDb";
 
 const state = vi.hoisted(() => ({ db: null as unknown }));
 vi.mock("@/db/client", () => ({ getDb: () => state.db }));
@@ -140,18 +137,9 @@ describe("projects in a real database", () => {
   let pg: PGlite;
 
   beforeAll(async () => {
-    pg = await PGlite.create();
-    await pg.exec(`
-      create schema assistant;
-      create table assistant.users (id uuid primary key);
-      insert into assistant.users (id) values ('${OWNER}'), ('${OTHER}');
-    `);
-    // The production migration itself, statement by statement.
-    const migration = readFileSync("drizzle/0018_projects.sql", "utf8");
-    for (const statement of migration.split("--> statement-breakpoint")) {
-      if (statement.trim()) await pg.exec(statement);
-    }
-    state.db = drizzle(pg, { schema }) as PgliteDatabase<typeof schema>;
+    const test = await createProjectsTestDb([OWNER, OTHER]);
+    pg = test.pg;
+    state.db = test.db;
   });
 
   afterAll(async () => {

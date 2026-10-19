@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { resolveMiniAppOwner } from "@/lib/telegramWebApp";
+import { summarizeProject } from "@/services/projectSummary";
 import {
   addProjectEntryFromApp,
   createProjectFromApp,
@@ -18,6 +19,8 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// "Обновить сводку" waits for the model.
+export const maxDuration = 120;
 
 const status = z.enum(PROJECT_STATUSES);
 const shortText = z.string().trim().max(300);
@@ -39,6 +42,11 @@ const entrySchema = z.object({
   text: z.string().trim().min(1).max(2000),
 });
 
+const summarizeSchema = z.object({
+  action: z.literal("summarize"),
+  projectId: z.string().uuid(),
+});
+
 const projectPatchSchema = z.object({
   id: z.string().uuid(),
   title: z.string().trim().min(1).max(200).optional(),
@@ -58,7 +66,9 @@ function failure(error: unknown) {
   if (error instanceof ProjectError) {
     return NextResponse.json(
       { ok: false, error: error.code },
-      { status: error.code === "not_found" ? 404 : 400 },
+      {
+        status: error.code === "not_found" ? 404 : error.code === "summary_failed" ? 503 : 400,
+      },
     );
   }
   throw error;
@@ -83,7 +93,8 @@ export async function GET(request: Request) {
   }
 }
 
-// {action: "create"} a new project; {action: "entry"} adds a done / todo / note line.
+// {action: "create"} a new project; {action: "entry"} adds a done / todo / note line;
+// {action: "summarize"} has JARVIS rewrite "где остановился" from the log.
 export async function POST(request: Request) {
   const owner = await resolveMiniAppOwner(request);
   if (!owner) return unauthorized();
@@ -112,6 +123,13 @@ export async function POST(request: Request) {
       return NextResponse.json({
         ok: true,
         project: await addProjectEntryFromApp({ userId: owner.id, projectId, kind, text }),
+      });
+    }
+    const summarize = summarizeSchema.safeParse(raw);
+    if (summarize.success) {
+      return NextResponse.json({
+        ok: true,
+        project: await summarizeProject({ user: owner, projectId: summarize.data.projectId }),
       });
     }
   } catch (error) {

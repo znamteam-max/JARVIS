@@ -42,11 +42,21 @@ export async function updateProject(
     summary?: string | null;
     repo?: string | null;
   },
+  // metadata is merged into what is stored; touch = false keeps "updated" as it was
+  // (a regenerated summary is not progress on the project).
+  options: { metadata?: Record<string, unknown>; touch?: boolean } = {},
 ) {
   const now = new Date();
   const [row] = await getDb()
     .update(projects)
-    .set({ ...patch, updatedAt: now, lastActivityAt: now })
+    .set({
+      ...patch,
+      updatedAt: now,
+      ...(options.touch === false ? {} : { lastActivityAt: now }),
+      ...(options.metadata
+        ? { metadata: sql`${projects.metadata} || ${JSON.stringify(options.metadata)}::jsonb` }
+        : {}),
+    })
     .where(and(eq(projects.userId, userId), eq(projects.id, projectId)))
     .returning();
   return row ?? null;
