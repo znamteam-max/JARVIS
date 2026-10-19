@@ -845,3 +845,43 @@
   color: var(--accent);
   text-decoration: none;
 }
+
+.projectState {
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text);
+  opacity: 0.85;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* JARVIS: the bar on home and its own window over any screen */
+.askCard {
+  composes: card;
+  gap: 10px;
+}
+
+.jarvisWindow {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: calc(16px + env(safe-area-inset-top)) 16px calc(12px + env(safe-area-inset-bottom));
+  overflow-y: auto;
+}
+
+.micActive {
+  composes: iconButton;
+  background: #e5484d;
+  color: #fff;
+}
+
+.recordingNote {
+  font-size: 13px;
+  color: #ff7a7d;
+}

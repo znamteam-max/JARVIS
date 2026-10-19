@@ -30,6 +30,7 @@ import { buildMiniAppSummary, type MiniAppSummary } from "@/services/miniappSumm
 import { completePlannerItemFromApp } from "@/services/plannerItemComplete";
 import { deletePlannerItemEverywhere } from "@/services/plannerItemDelete";
 import { editPlannerItemFromApp, PlannerItemEditError } from "@/services/plannerItemEdit";
+import { projectsContextBlock } from "@/services/projects";
 
 const HISTORY_MESSAGES = 40;
 const MAX_ACTIONS = 5;
@@ -191,6 +192,7 @@ type ChatHistory = Array<Pick<CoachMessage, "role" | "content" | "createdAt" | "
 export async function buildJarvisPrompt(user: User, now: Date, history: ChatHistory) {
   const summary = await buildMiniAppSummary(user, now);
   const context = await buildCoachContext(user, now, summary);
+  const projects = await projectsContextBlock(user.id);
   return {
     summary,
     system: [
@@ -198,7 +200,10 @@ export async function buildJarvisPrompt(user: User, now: Date, history: ChatHist
       OPERATOR_INSTRUCTIONS,
       `# Данные\n${context}`,
       editableItemsBlock(summary.plan),
-    ].join("\n\n"),
+      projects,
+    ]
+      .filter(Boolean)
+      .join("\n\n"),
     prompt: conversationTranscript(history, user.timezone, "JARVIS"),
     schema: DECISION_SCHEMA as unknown as Record<string, unknown>,
   };

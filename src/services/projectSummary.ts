@@ -3,7 +3,13 @@ import { DateTime } from "luxon";
 import { askClaudeRelay, isClaudeRelayConfigured } from "@/ai/claudeRelay";
 import { canUseOpenAI, getOpenAIClient } from "@/ai/openaiClient";
 import { writeAudit } from "@/db/queries/audit";
-import { getProject, listProjectEntries, updateProject } from "@/db/queries/projects";
+import {
+  getProject,
+  listProjectEntries,
+  listProjectsNeedingSummary,
+  updateProject,
+} from "@/db/queries/projects";
+import { getUserById } from "@/db/queries/users";
 import type { Project, ProjectEntry, User } from "@/db/schema";
 import { getEnv } from "@/lib/env";
 import { logger } from "@/lib/logger";
@@ -14,6 +20,9 @@ const MAX_DONE = 60;
 const MAX_NOTES = 20;
 const MAX_ENTRY_CHARS = 300;
 const MAX_SUMMARY_CHARS = 1500;
+// Automatic summaries: one project per scheduler tick, and a failed one waits this long.
+const AUTO_PER_TICK = 1;
+const AUTO_RETRY_MS = 20 * 60 * 1000;
 
 export const PROJECT_SUMMARY_INSTRUCTIONS = `Ты — JARVIS, помощник владельца. По журналу проекта напиши короткую сводку «где остановился», чтобы владелец за 20 секунд вспомнил, что происходит.
 
@@ -27,6 +36,7 @@ export const PROJECT_SUMMARY_INSTRUCTIONS = `Ты — JARVIS, помощник �
 - Только факты из журнала и прежней сводки. Не придумывай сроков, причин и шагов, которых там нет.
 - Прежнюю сводку, написанную владельцем, считай достоверной: сохрани её факты, если свежие записи им не противоречат. Свежие записи важнее старых.
 - Записи из GitHub и Claude Code бывают на английском и техническими — перескажи их по-русски, человеческими словами.
+- Описание из README — только чтобы понять, что это за проект; состояние бери из журнала и локального состояния (незакоммиченные изменения значат, что работа в процессе).
 - Если журнал почти пустой, скажи это одной строкой и предложи записать первый шаг.
 - Если движения не было больше двух недель, отметь это в строке «Сейчас».
 - Пиши по-русски, коротко, без воды и без обращения к владельцу.`;
@@ -41,12 +51,29 @@ const STATUS_TEXT: Record<string, string> = {
 const SOURCE_TEXT: Record<string, string> = {
   github: " [GitHub]",
   claude_code: " [Claude Code]",
+  git: " [git]",
   ai: " [JARVIS]",
 };
 
 function clip(text: string) {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length > MAX_ENTRY_CHARS ? `${flat.slice(0, MAX_ENTRY_CHARS - 1)}…` : flat;
+}
+
+// What the owner's computer last reported: branch and uncommitted work, or "not in git".
+function localState(raw: unknown) {
+  if (!raw || typeof raw !== "object") return null;
+  const local = raw as { git?: unknown; branch?: unknown; dirty?: unknown };
+  if (local.git === false) return "Локально: папка без git";
+  const parts = [
+    typeof local.branch === "string" ? `ветка ${local.branch}` : null,
+    typeof local.dirty === "number"
+      ? local.dirty
+        ? `незакоммиченных изменений: ${local.dirty}`
+        : "всё закоммичено"
+      : null,
+  ].filter(Boolean);
+  return parts.length ? `Локально: ${parts.join(", ")}` : null;
 }
 
 // Everything the model may rely on, and nothing else.
@@ -75,12 +102,14 @@ export function buildProjectSummaryPrompt(params: {
 
   const meta = project.metadata ?? {};
   const previousBy = meta.summarySource === "manual" ? "владелец" : "JARVIS";
+  const readme = typeof meta.readme === "string" && meta.readme.trim() ? meta.readme.trim() : null;
   const sections = [
     `Сегодня: ${day(params.now)}`,
     `Проект: ${project.title}`,
     `Статус: ${STATUS_TEXT[project.status] ?? project.status}`,
     project.status === "waiting" && project.waitingFor ? `Ждём: ${project.waitingFor}` : null,
     project.repo ? `Репозиторий: ${project.repo}` : null,
+    localState(meta.local),
     `Последнее движение: ${day(project.lastActivityAt)}`,
     project.summary ? `Прежняя сводка (написал ${previousBy}):\n${project.summary}` : null,
     `Впереди (${ahead.length}):\n${ahead.map((entry) => line(entry, entry.occurredAt)).join("\n") || "- пусто"}`,
@@ -90,6 +119,10 @@ export function buildProjectSummaryPrompt(params: {
         .map(({ entry, at }) => line(entry, at))
         .join("\n") || "- пусто"
     }`,
+    readme
+      ? `Описание проекта (README):
+${readme}`
+      : null,
     notes.length
       ? `Заметки:\n${notes
           .slice(0, MAX_NOTES)
@@ -171,7 +204,10 @@ export async function summarizeProject(params: { user: User; projectId: string; 
   // makes it stale.
   const readAt = new Date();
   const entries = await listProjectEntries(user.id, projectId);
-  if (entries.length === 0 && !project.summary) throw new ProjectError("nothing_to_summarize");
+  const hasReadme = typeof project.metadata?.readme === "string" && project.metadata.readme.trim();
+  if (entries.length === 0 && !project.summary && !hasReadme) {
+    throw new ProjectError("nothing_to_summarize");
+  }
 
   let answer: SummaryAnswer;
   try {
@@ -207,4 +243,35 @@ export async function summarizeProject(params: { user: User; projectId: string; 
     },
   );
   return getProjectView(user.id, projectId);
+}
+
+// On the scheduler tick: a project with new lines (commits, a Claude Code session, an
+// import) or no summary yet gets "где остановился" written by itself, so the list always
+// shows where things stand. Summaries the owner wrote are left for them to update.
+export async function summarizeStaleProjects(now = new Date()) {
+  const due = await listProjectsNeedingSummary({
+    retryBefore: new Date(now.getTime() - AUTO_RETRY_MS),
+    limit: AUTO_PER_TICK,
+  });
+  let written = 0;
+  for (const project of due) {
+    await updateProject(
+      project.userId,
+      project.id,
+      {},
+      { touch: false, metadata: { summaryAttemptAt: now.toISOString() } },
+    );
+    const user = await getUserById(project.userId);
+    if (!user) continue;
+    try {
+      await summarizeProject({ user, projectId: project.id, now });
+      written += 1;
+    } catch (error) {
+      logger.warn("Automatic project summary failed", {
+        projectId: project.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return { checked: due.length, written };
 }

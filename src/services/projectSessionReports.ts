@@ -95,7 +95,8 @@ function clipAssistant(text: string) {
     : text;
 }
 
-async function resolveOwner() {
+// The planner's owner: reports and imports from this computer are always theirs.
+export async function resolveReportOwner() {
   const [ownerTelegramId] = [...getAllowedTelegramUserIds()];
   return ownerTelegramId ? getUserByTelegramId(ownerTelegramId) : null;
 }
@@ -103,7 +104,7 @@ async function resolveOwner() {
 // The hook's POST: find (or start) the project and keep the session's latest report.
 // Processing happens on the scheduler tick, so the hook never waits for a model.
 export async function receiveSessionReport(input: SessionReportInput, now = new Date()) {
-  const owner = await resolveOwner();
+  const owner = await resolveReportOwner();
   if (!owner) return null;
   let project = await findProjectForReport(owner.id, input.repo, input.folder);
   const created = !project;

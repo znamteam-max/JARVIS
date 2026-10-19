@@ -38,6 +38,7 @@ const KIND_PLACEHOLDERS: Record<EntryKind, string> = {
 const SOURCE_LABELS: Record<string, string> = {
   github: "GitHub",
   claude_code: "Claude Code",
+  git: "git",
   ai: "JARVIS",
 };
 
@@ -212,6 +213,9 @@ export function ProjectsTab({ api }: { api: Api }) {
           </span>
           {project.status === "waiting" && project.waitingFor ? (
             <span className={styles.detail}>Ждём: {project.waitingFor}</span>
+          ) : null}
+          {project.summaryLine ? (
+            <span className={styles.projectState}>{project.summaryLine}</span>
           ) : null}
           {project.lastDone ? (
             <span className={styles.projectLine}>

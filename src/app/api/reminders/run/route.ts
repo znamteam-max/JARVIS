@@ -5,6 +5,7 @@ import { reviewNewWorkoutsIfDue } from "@/services/coachReviews";
 import { backfillFoodPhotos } from "@/services/foodPhotos";
 import { syncGithubProjectsIfDue } from "@/services/projectGithubSync";
 import { processDueSessionReports } from "@/services/projectSessionReports";
+import { summarizeStaleProjects } from "@/services/projectSummary";
 import { syncAthletesIntervalsIfDue, syncIntervalsIfDue } from "@/services/intervalsSync";
 import { syncStravaIfDue } from "@/services/stravaSync";
 import { requireEnv } from "@/lib/env";
@@ -50,6 +51,14 @@ export async function POST(request: Request) {
   after(() =>
     processDueSessionReports().catch((error) =>
       logger.warn("Session reports tick failed", {
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    ),
+  );
+  // A project with new lines gets its summary rewritten by itself, one per tick.
+  after(() =>
+    summarizeStaleProjects().catch((error) =>
+      logger.warn("Project summaries tick failed", {
         error: error instanceof Error ? error.message : String(error),
       }),
     ),

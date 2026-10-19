@@ -28,6 +28,8 @@ export type ProjectListView = {
   lastActivityAt: string;
   openTodos: number;
   lastDone: { text: string; at: string } | null;
+  // Where it stands in one line: the start of the summary.
+  summaryLine: string | null;
 };
 
 export type ProjectEntryView = {
@@ -99,6 +101,17 @@ export function normalizeRepo(raw: string | null | undefined): string | null {
   return `${match[1]}/${match[2]}`;
 }
 
+// "Сейчас: вкладка готова, ждёт деплоя. / Сделано: …" → "вкладка готова, ждёт деплоя."
+export function summaryLine(summary: string | null) {
+  const first = (summary ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .find(Boolean);
+  if (!first) return null;
+  const text = first.replace(/^(Сейчас|Состояние)\s*:\s*/i, "");
+  return text.length > 160 ? `${text.slice(0, 159)}…` : text;
+}
+
 // Active first, then waiting, paused and done; inside a group the freshest on top.
 export function buildProjectList(
   rows: Project[],
@@ -119,6 +132,7 @@ export function buildProjectList(
         lastActivityAt: row.lastActivityAt.toISOString(),
         openTodos: snapshots.openTodos.get(row.id) ?? 0,
         lastDone: lastDone ? { text: lastDone.text, at: lastDone.at.toISOString() } : null,
+        summaryLine: summaryLine(row.summary),
       };
     })
     .sort(
@@ -323,4 +337,37 @@ export async function removeProjectEntry(userId: string, entryId: string) {
   const deleted = await deleteProjectEntry(userId, entryId);
   if (!deleted) throw new ProjectError("not_found");
   return getProjectView(userId, deleted.projectId);
+}
+
+const CONTEXT_PROJECTS = 15;
+const STATUS_TEXT: Record<ProjectStatus, string> = {
+  active: "в работе",
+  waiting: "ждёт",
+  paused: "на паузе",
+  done: "готов",
+};
+
+// The owner's projects for JARVIS: what each is, where it stands and what is next, so
+// "что с проектом X?" gets a real answer. Never breaks the chat: on any trouble, no block.
+export async function projectsContextBlock(userId: string) {
+  try {
+    const list = (await listProjectsView(userId))
+      .filter((project) => project.status !== "done")
+      .slice(0, CONTEXT_PROJECTS);
+    if (!list.length) return null;
+    const lines = list.map((project) => {
+      const state = [
+        STATUS_TEXT[project.status],
+        project.waitingFor ? `ждём: ${project.waitingFor}` : null,
+        `обновлён ${project.lastActivityAt.slice(0, 10)}`,
+      ]
+        .filter(Boolean)
+        .join(", ");
+      const where = project.summaryLine ?? project.lastDone?.text ?? "сводки пока нет";
+      return `- ${project.title} (${state}): ${where}; впереди шагов: ${project.openTodos}`;
+    });
+    return `# Проекты владельца (вкладка «Проекты»; отвечай по ним, когда спрашивают о проекте)\n${lines.join("\n")}`;
+  } catch {
+    return null;
+  }
 }
