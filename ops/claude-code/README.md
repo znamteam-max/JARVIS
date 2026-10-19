@@ -66,6 +66,21 @@ replaced with `[redacted]` before anything is stored or sent to a model.
 Without the config file the hook does nothing, so it is safe to install first and turn on
 later.
 
+## Import all projects
+
+`import-projects.mjs` puts every folder of `~/GitHub` (or `--dir <path>`) into the Projects
+tab at once: its recent commits, branch, uncommitted changes and README. Work projects
+(RNGN*) are skipped here and refused by the server. Running it again adds nothing twice;
+JARVIS then writes each project's summary by itself, one per scheduler tick.
+
+```bash
+node ops/claude-code/import-projects.mjs --dry-run
+```
+
+```bash
+node ops/claude-code/import-projects.mjs
+```
+
 ## Check
 
 A dry run prints the report the hook would send for a transcript, without sending it:

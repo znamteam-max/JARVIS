@@ -21,8 +21,11 @@ import type { MiniAppSummary } from "@/services/miniappSummary";
 import { confirmAction } from "./confirmAction";
 import styles from "./miniapp.module.css";
 import { ProjectsTab } from "./ProjectsTab";
+import { recordingTime, useVoiceRecorder, type VoiceRecorder } from "./useVoiceRecorder";
 
-type Tab = "today" | "plan" | "projects" | "food" | "fitness" | "coach";
+type Tab = "today" | "plan" | "projects" | "food" | "fitness";
+// Asked from the home screen: sent as soon as the JARVIS window opens.
+type JarvisAsk = { kind: "text"; text: string } | { kind: "voice"; audio: Blob };
 type Mode = "telegram" | "browser";
 type InstallPrompt = Event & { prompt(): Promise<void> };
 type TelegramWebApp = {
@@ -66,6 +69,8 @@ export function MiniApp() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [installPrompt, setInstallPrompt] = useState<InstallPrompt | null>(null);
+  // The JARVIS window over any screen, with what was asked from home (if anything).
+  const [jarvis, setJarvis] = useState<{ ask: JarvisAsk | null } | null>(null);
 
   const initDataRef = useRef("");
   const startedRef = useRef(false);
@@ -151,9 +156,11 @@ export function MiniApp() {
       initDataRef.current = app.initData;
     }
     setMode(app?.initData ? "telegram" : "browser");
-    // "Открыть разбор" in the coach's notification opens /app?tab=coach.
+    // "Открыть разбор" in the coach's notification opens /app?tab=coach: the JARVIS window.
     const wanted = new URLSearchParams(window.location.search).get("tab");
-    if (wanted && ["today", "plan", "projects", "food", "fitness", "coach"].includes(wanted)) {
+    if (wanted === "coach" || wanted === "jarvis") {
+      setJarvis({ ask: null });
+    } else if (wanted && ["today", "plan", "projects", "food", "fitness"].includes(wanted)) {
       setTab(wanted as Tab);
     }
     void call("/api/miniapp/summary");
@@ -195,6 +202,7 @@ export function MiniApp() {
           <TodayTab
             summary={summary}
             openPlan={() => setTab("plan")}
+            ask={(next) => setJarvis({ ask: next ?? null })}
             call={call}
             busy={busy}
             mode={mode}
@@ -212,13 +220,6 @@ export function MiniApp() {
         {summary && tab === "plan" ? <PlanTab summary={summary} call={call} busy={busy} /> : null}
         {summary && tab === "projects" ? <ProjectsTab api={api} /> : null}
         {summary && tab === "food" ? <FoodTab summary={summary} busy={busy} call={call} /> : null}
-        {summary && tab === "coach" ? (
-          <CoachTab
-            api={api}
-            mode={mode ?? "browser"}
-            refresh={() => void call("/api/miniapp/summary")}
-          />
-        ) : null}
         {summary && tab === "fitness" ? (
           <FitnessTab summary={summary} call={call} busy={busy} />
         ) : null}
@@ -231,7 +232,6 @@ export function MiniApp() {
             ["projects", "Проекты", "M3 7h6l2 2h10v10H3zM3 7V5h6l2 2"],
             ["food", "Питание", "M7 3v8M5 3v5a2 2 0 0 0 4 0V3M7 11v10M17 3c-2 2-2 6 0 8v10"],
             ["fitness", "Тренировки", "M3 12h4l3-7 4 14 3-7h4"],
-            ["coach", "JARVIS", "M4 5h16v11H9l-5 4z"],
           ] as Array<[Tab, string, string]>
         ).map(([id, label, icon]) => (
           <button
@@ -256,6 +256,17 @@ export function MiniApp() {
           </button>
         ))}
       </nav>
+      {summary && jarvis ? (
+        <div className={styles.jarvisWindow} role="dialog" aria-modal="true" aria-label="JARVIS">
+          <CoachTab
+            api={api}
+            mode={mode ?? "browser"}
+            refresh={() => void call("/api/miniapp/summary")}
+            ask={jarvis.ask}
+            close={() => setJarvis(null)}
+          />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -280,6 +291,7 @@ const UPCOMING_SECTIONS = /^(Завтра|Скоро|Позже)/;
 function TodayTab({
   summary,
   openPlan,
+  ask,
   call,
   busy,
   mode,
@@ -288,6 +300,7 @@ function TodayTab({
 }: {
   summary: MiniAppSummary;
   openPlan: () => void;
+  ask: (next?: JarvisAsk) => void;
   call: Call;
   busy: boolean;
   mode: Mode | null;
@@ -335,6 +348,7 @@ function TodayTab({
           </svg>
         </button>
       </div>
+      <AskJarvisBar ask={ask} />
       <div className={styles.ringCard}>
         <div className={styles.ring}>
           <svg
@@ -2014,6 +2028,127 @@ function chatTime(iso: string) {
   });
 }
 
+// The request for a question asked in words or by voice.
+function jarvisRequest(ask: JarvisAsk): RequestInit {
+  if (ask.kind === "text") {
+    return {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: ask.text }),
+    };
+  }
+  const extension = /mp4|m4a|aac/.test(ask.audio.type)
+    ? "m4a"
+    : /ogg/.test(ask.audio.type)
+      ? "ogg"
+      : "webm";
+  const form = new FormData();
+  form.append("audio", ask.audio, `voice.${extension}`);
+  return { method: "POST", body: form };
+}
+
+// What the question bubble shows until the answer (with the recognised text) comes back.
+function askBubble(ask: JarvisAsk) {
+  return ask.kind === "text" ? ask.text : "🎤 Распознаю голос…";
+}
+
+const JARVIS_ERRORS: Record<string, string> = {
+  voice_empty: "Не расслышал. Скажи ещё раз чуть громче или напиши текстом.",
+  voice_failed: "Не получилось распознать голос. Попробуй ещё раз или напиши текстом.",
+  voice_too_large: "Слишком длинная запись — уложись в пару минут.",
+};
+
+function MicButton({ voice, disabled }: { voice: VoiceRecorder; disabled?: boolean }) {
+  return (
+    <button
+      type="button"
+      className={voice.recording ? styles.micActive : styles.iconButton}
+      aria-label={voice.recording ? "Остановить и отправить" : "Сказать голосом"}
+      disabled={disabled}
+      onClick={voice.toggle}
+    >
+      <svg
+        width="20"
+        height="20"
+        viewBox="0 0 24 24"
+        fill={voice.recording ? "currentColor" : "none"}
+        stroke="currentColor"
+        strokeWidth="2"
+        aria-hidden="true"
+      >
+        {voice.recording ? (
+          <rect x="7" y="7" width="10" height="10" rx="2" />
+        ) : (
+          <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v3" />
+        )}
+      </svg>
+    </button>
+  );
+}
+
+function VoiceStatus({ voice }: { voice: VoiceRecorder }) {
+  if (voice.recording) {
+    return (
+      <span className={styles.recordingNote} role="status">
+        ● {recordingTime(voice.seconds)} — говори, потом нажми ■, чтобы отправить
+      </span>
+    );
+  }
+  return voice.error ? <span className={styles.caption}>{voice.error}</span> : null;
+}
+
+// Home: ask or tell JARVIS anything, in words or by voice; the answer opens its window.
+function AskJarvisBar({ ask }: { ask: (next?: JarvisAsk) => void }) {
+  const [text, setText] = useState("");
+  const voice = useVoiceRecorder((audio) => ask({ kind: "voice", audio }));
+
+  function submit() {
+    const message = text.trim();
+    if (!message) return;
+    setText("");
+    ask({ kind: "text", text: message });
+  }
+
+  return (
+    <section className={styles.askCard} aria-label="Спросить JARVIS">
+      <div className={styles.header}>
+        <h2 className={styles.sectionTitle}>JARVIS</h2>
+        <button type="button" className={styles.linkButton} onClick={() => ask()}>
+          Открыть чат
+        </button>
+      </div>
+      <div className={styles.composerRow}>
+        <textarea
+          className={styles.composerInput}
+          rows={1}
+          value={text}
+          placeholder="Спроси или поручи: «напомни завтра в 10…»"
+          aria-label="Вопрос JARVIS"
+          onChange={(event) => setText(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              submit();
+            }
+          }}
+        />
+        <MicButton voice={voice} />
+        <button
+          type="button"
+          className={styles.primary}
+          style={{ minHeight: 44, padding: "0 16px" }}
+          aria-label="Отправить"
+          disabled={!text.trim() || voice.recording}
+          onClick={submit}
+        >
+          ↑
+        </button>
+      </div>
+      <VoiceStatus voice={voice} />
+    </section>
+  );
+}
+
 const COACH_PROMPTS = [
   "Что у меня сегодня?",
   "Что мне делать на тренировке сегодня?",
@@ -2023,19 +2158,58 @@ const COACH_PROMPTS = [
 
 // Chat with the AI coach: it sees rides (with power from FIT files), watch data, sleep,
 // the schedule and today's food. 📎 sends a FIT export for a review.
-function CoachTab({ api, mode, refresh }: { api: Api; mode: Mode; refresh: () => void }) {
-  const [messages, setMessages] = useState<CoachMessageView[] | null>(null);
+function CoachTab({
+  api,
+  mode,
+  refresh,
+  ask,
+  close,
+}: {
+  api: Api;
+  mode: Mode;
+  refresh: () => void;
+  // Asked from home: shown at once and sent instead of just loading the chat.
+  ask: JarvisAsk | null;
+  close: () => void;
+}) {
+  const [messages, setMessages] = useState<CoachMessageView[] | null>(() =>
+    ask ? [{ id: "local-ask", role: "user", content: askBubble(ask), createdAt: "" }] : null,
+  );
   const [text, setText] = useState("");
-  const [sending, setSending] = useState(false);
+  const [sending, setSending] = useState(Boolean(ask));
   const [error, setError] = useState<string | null>(null);
   const [exportNote, setExportNote] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const firstAsk = useRef(ask);
+  const refreshRef = useRef(refresh);
 
   useEffect(() => {
-    void api("/api/miniapp/coach").then((body) =>
-      setMessages(Array.isArray(body?.messages) ? (body.messages as CoachMessageView[]) : []),
-    );
+    refreshRef.current = refresh;
+  }, [refresh]);
+
+  useEffect(() => {
+    const pending = firstAsk.current;
+    firstAsk.current = null;
+    if (!pending) {
+      void api("/api/miniapp/coach").then((body) =>
+        setMessages(Array.isArray(body?.messages) ? (body.messages as CoachMessageView[]) : []),
+      );
+      return;
+    }
+    void api("/api/miniapp/coach", jarvisRequest(pending)).then((body) => {
+      if (Array.isArray(body?.messages)) setMessages(body.messages as CoachMessageView[]);
+      if (body?.changed) refreshRef.current();
+      if (!body?.ok) {
+        setError(
+          typeof body?.message === "string"
+            ? body.message
+            : (JARVIS_ERRORS[String(body?.error)] ??
+                "JARVIS не ответил. Попробуй ещё раз через минуту."),
+        );
+      }
+      setSending(false);
+    });
   }, [api]);
 
   useEffect(() => {
@@ -2057,11 +2231,20 @@ function CoachTab({ api, mode, refresh }: { api: Api; mode: Mode; refresh: () =>
       setError(
         typeof body?.message === "string"
           ? body.message
-          : "Тренер не ответил. Попробуй ещё раз через минуту.",
+          : (JARVIS_ERRORS[String(body?.error)] ??
+              "JARVIS не ответил. Попробуй ещё раз через минуту."),
       );
     }
     setSending(false);
   }
+
+  function sendVoice(audio: Blob) {
+    if (sending) return;
+    const voiceAsk: JarvisAsk = { kind: "voice", audio };
+    void run(jarvisRequest(voiceAsk), askBubble(voiceAsk));
+  }
+
+  const voice = useVoiceRecorder((audio) => sendVoice(audio));
 
   function send(raw: string) {
     const message = raw.trim();
@@ -2122,10 +2305,21 @@ function CoachTab({ api, mode, refresh }: { api: Api; mode: Mode; refresh: () =>
     <>
       <div className={styles.header}>
         <div className={styles.headerText}>
-          <span className={styles.caption}>дела, еда, тренировки — пиши как человеку</span>
+          <span className={styles.caption}>дела, еда, тренировки, проекты — пиши или говори</span>
           <h1 className={styles.title}>JARVIS</h1>
         </div>
         <div className={styles.headerActions}>
+          <button
+            type="button"
+            className={styles.iconButton}
+            aria-label="Закрыть JARVIS"
+            onClick={() => {
+              voice.cancel();
+              close();
+            }}
+          >
+            ✕
+          </button>
           <button
             type="button"
             className={styles.secondary}
@@ -2183,6 +2377,7 @@ function CoachTab({ api, mode, refresh }: { api: Api; mode: Mode; refresh: () =>
       </div>
       {error ? <div className={styles.error}>{error}</div> : null}
       <div className={styles.composer}>
+        <VoiceStatus voice={voice} />
         <div className={styles.promptRow}>
           {COACH_PROMPTS.map((prompt) => (
             <button
@@ -2217,11 +2412,12 @@ function CoachTab({ api, mode, refresh }: { api: Api; mode: Mode; refresh: () =>
           >
             📎
           </button>
+          <MicButton voice={voice} disabled={sending} />
           <textarea
             className={styles.composerInput}
             rows={1}
             value={text}
-            placeholder="Напиши JARVIS…"
+            placeholder="Напиши или скажи JARVIS…"
             aria-label="Сообщение тренеру"
             onChange={(event) => setText(event.target.value)}
             onKeyDown={(event) => {

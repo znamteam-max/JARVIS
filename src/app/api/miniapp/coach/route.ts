@@ -7,6 +7,7 @@ import { logger } from "@/lib/logger";
 import { resolveMiniAppOwner } from "@/lib/telegramWebApp";
 import { listCoachConversation, uploadRideToCoach } from "@/services/coach";
 import { askJarvis } from "@/services/jarvisAgent";
+import { MAX_VOICE_BYTES, transcribeVoiceQuestion } from "@/services/voiceQuestion";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,13 +23,41 @@ export async function GET(request: Request) {
   return NextResponse.json({ ok: true, messages: await listCoachConversation(owner.id) });
 }
 
-// JSON {message} = a question; multipart {file} = a FIT export to review.
+// JSON {message} = a question; multipart {audio} = a spoken question; multipart {file} =
+// a FIT export to review.
 export async function POST(request: Request) {
   const owner = await resolveMiniAppOwner(request);
   if (!owner) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   try {
     if (request.headers.get("content-type")?.includes("multipart/form-data")) {
       const form = await request.formData().catch(() => null);
+      const audio = form?.get("audio");
+      if (audio instanceof File) {
+        if (audio.size === 0 || audio.size > MAX_VOICE_BYTES) {
+          return NextResponse.json({ ok: false, error: "voice_too_large" }, { status: 400 });
+        }
+        let transcript: string;
+        try {
+          transcript = await transcribeVoiceQuestion({
+            user: owner,
+            bytes: new Uint8Array(await audio.arrayBuffer()),
+            mimeType: audio.type || null,
+          });
+        } catch (error) {
+          logger.warn("Voice question transcription failed", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return NextResponse.json({ ok: false, error: "voice_failed" }, { status: 502 });
+        }
+        if (!transcript) {
+          return NextResponse.json({ ok: false, error: "voice_empty" }, { status: 400 });
+        }
+        const { messages, changed } = await askJarvis({
+          user: owner,
+          message: transcript.slice(0, 2000),
+        });
+        return NextResponse.json({ ok: true, messages, changed, transcript });
+      }
       const file = form?.get("file");
       if (!(file instanceof File) || file.size === 0 || file.size > MAX_FIT_BYTES) {
         return NextResponse.json(

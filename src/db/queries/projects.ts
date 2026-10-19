@@ -23,6 +23,37 @@ export async function listProjects(userId: string) {
     .orderBy(desc(projects.lastActivityAt));
 }
 
+// Projects whose summary JARVIS should (re)write by itself: not done, no summary yet or one
+// it wrote itself (the owner's own text is left alone), something to say (log lines or a
+// README), newer lines than the summary, and no attempt in the last while.
+export async function listProjectsNeedingSummary(params: { retryBefore: Date; limit: number }) {
+  const p = projects;
+  const e = projectEntries;
+  return (await projectsDb())
+    .select()
+    .from(p)
+    .where(
+      and(
+        ne(p.status, "done"),
+        sql`(${p.summary} is null or ${p.metadata}->>'summarySource' = 'ai')`,
+        sql`coalesce((${p.metadata}->>'summaryAttemptAt')::timestamptz, 'epoch'::timestamptz) < ${params.retryBefore.toISOString()}::timestamptz`,
+        sql`(
+          (${p.summary} is null and (
+            exists (select 1 from ${e} where ${e.projectId} = ${p.id})
+            or coalesce(${p.metadata}->>'readme', '') <> ''
+          ))
+          or exists (
+            select 1 from ${e}
+            where ${e.projectId} = ${p.id}
+              and ${e.updatedAt} > (${p.metadata}->>'summaryAt')::timestamptz
+          )
+        )`,
+      ),
+    )
+    .orderBy(desc(p.lastActivityAt))
+    .limit(params.limit);
+}
+
 // Every project linked to a GitHub repo and not finished: the commit sync's work list.
 export async function listProjectsWithRepo() {
   return (await projectsDb())

@@ -93,7 +93,7 @@ export function isExcluded(patterns, { repo, folder }) {
 
 // ~/.claude/jarvis-report.json {url, token, exclude?: ["pattern", ...]}; JARVIS_REPORT_URL and
 // JARVIS_REPORT_TOKEN win over the file's url and token. RNGN* is excluded in any case.
-function readConfig() {
+export function readConfig() {
   let file = null;
   try {
     file = JSON.parse(readFileSync(join(homedir(), ".claude", "jarvis-report.json"), "utf8"));
