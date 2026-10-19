@@ -1022,5 +1022,37 @@ export const projectEntries = assistantTable(
   ],
 );
 
+// The latest report of one Claude Code session, waiting to become log lines. The raw text
+// is dropped once processed; done/next keep what the session has reported so far.
+export const projectSessionReports = assistantTable(
+  "project_session_reports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    sessionId: text("session_id").notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>(),
+    payloadHash: text("payload_hash").notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    processedHash: text("processed_hash"),
+    processedAt: timestamp("processed_at", { withTimezone: true }),
+    done: text("done"),
+    next: jsonb("next").$type<string[]>().notNull().default(emptyArrayJson),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("project_session_reports_user_session_uq").on(table.userId, table.sessionId),
+    index("project_session_reports_received_idx").on(table.receivedAt),
+  ],
+);
+
 export type Project = typeof projects.$inferSelect;
 export type ProjectEntry = typeof projectEntries.$inferSelect;
+export type ProjectSessionReport = typeof projectSessionReports.$inferSelect;

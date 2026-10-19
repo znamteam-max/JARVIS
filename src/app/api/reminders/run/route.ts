@@ -4,6 +4,7 @@ import { runDueReminders } from "@/jobs/runDueReminders";
 import { reviewNewWorkoutsIfDue } from "@/services/coachReviews";
 import { backfillFoodPhotos } from "@/services/foodPhotos";
 import { syncGithubProjectsIfDue } from "@/services/projectGithubSync";
+import { processDueSessionReports } from "@/services/projectSessionReports";
 import { syncAthletesIntervalsIfDue, syncIntervalsIfDue } from "@/services/intervalsSync";
 import { syncStravaIfDue } from "@/services/stravaSync";
 import { requireEnv } from "@/lib/env";
@@ -41,6 +42,14 @@ export async function POST(request: Request) {
   after(() =>
     syncGithubProjectsIfDue().catch((error) =>
       logger.warn("GitHub projects sync tick failed", {
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    ),
+  );
+  // Claude Code sessions that went quiet become project log lines (a model call each).
+  after(() =>
+    processDueSessionReports().catch((error) =>
+      logger.warn("Session reports tick failed", {
         error: error instanceof Error ? error.message : String(error),
       }),
     ),

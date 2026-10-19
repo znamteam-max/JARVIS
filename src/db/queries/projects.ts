@@ -1,4 +1,16 @@
-import { and, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
+import {
+  and,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  like,
+  ne,
+  notInArray,
+  or,
+  sql,
+} from "drizzle-orm";
 
 import { getDb } from "../client";
 import { projectEntries, projects, type ProjectEntry } from "../schema";
@@ -18,6 +30,28 @@ export async function listProjectsWithRepo() {
     .from(projects)
     .where(and(isNotNull(projects.repo), ne(projects.status, "done")))
     .orderBy(projects.lastActivityAt);
+}
+
+// A Claude Code report finds its project by repo (GitHub names ignore case), else by a
+// title equal to the folder name.
+export async function findProjectForReport(userId: string, repo: string | null, folder: string) {
+  if (repo) {
+    const [byRepo] = await getDb()
+      .select()
+      .from(projects)
+      .where(and(eq(projects.userId, userId), sql`lower(${projects.repo}) = ${repo.toLowerCase()}`))
+      .limit(1);
+    if (byRepo) return byRepo;
+  }
+  const [byTitle] = await getDb()
+    .select()
+    .from(projects)
+    .where(
+      and(eq(projects.userId, userId), sql`lower(${projects.title}) = ${folder.toLowerCase()}`),
+    )
+    .orderBy(desc(projects.lastActivityAt))
+    .limit(1);
+  return byTitle ?? null;
 }
 
 export async function getProject(userId: string, projectId: string) {
@@ -165,6 +199,69 @@ export async function insertProjectEntries(
     await touchProject(userId, projectId, new Date(latest));
   }
   return inserted;
+}
+
+// One line kept up to date by its source (a Claude Code session's "done so far"):
+// inserted once, then its text, date and metadata follow the latest report.
+export async function upsertProjectEntry(params: {
+  userId: string;
+  projectId: string;
+  kind: string;
+  source: string;
+  externalId: string;
+  text: string;
+  occurredAt: Date;
+  metadata?: Record<string, unknown>;
+}) {
+  const metadata = params.metadata ?? {};
+  const [row] = await getDb()
+    .insert(projectEntries)
+    .values({ ...params, metadata })
+    .onConflictDoUpdate({
+      target: [projectEntries.projectId, projectEntries.source, projectEntries.externalId],
+      targetWhere: sql`${projectEntries.externalId} is not null`,
+      set: { text: params.text, occurredAt: params.occurredAt, metadata, updatedAt: new Date() },
+    })
+    .returning();
+  await touchProject(params.userId, params.projectId, params.occurredAt);
+  return row;
+}
+
+// The open todos one source keeps under a prefix ("session:<id>:next:") become exactly
+// `items`: new ones are added, dropped open ones removed; ticked-off ones stay as they are.
+export async function replaceOpenEntries(params: {
+  userId: string;
+  projectId: string;
+  source: string;
+  prefix: string;
+  items: Array<{ externalId: string; text: string }>;
+  occurredAt: Date;
+}) {
+  const keep = params.items.map((item) => item.externalId);
+  await getDb()
+    .delete(projectEntries)
+    .where(
+      and(
+        eq(projectEntries.userId, params.userId),
+        eq(projectEntries.projectId, params.projectId),
+        eq(projectEntries.source, params.source),
+        eq(projectEntries.kind, "todo"),
+        isNull(projectEntries.closedAt),
+        like(projectEntries.externalId, `${params.prefix}%`),
+        keep.length ? notInArray(projectEntries.externalId, keep) : undefined,
+      ),
+    );
+  return insertProjectEntries(
+    params.userId,
+    params.projectId,
+    params.items.map((item) => ({
+      kind: "todo",
+      source: params.source,
+      externalId: item.externalId,
+      text: item.text,
+      occurredAt: params.occurredAt,
+    })),
+  );
 }
 
 export async function updateProjectEntry(
