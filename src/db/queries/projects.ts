@@ -12,11 +12,11 @@ import {
   sql,
 } from "drizzle-orm";
 
-import { getDb } from "../client";
+import { projectsDb } from "../ensureProjectsSchema";
 import { projectEntries, projects, type ProjectEntry } from "../schema";
 
 export async function listProjects(userId: string) {
-  return getDb()
+  return (await projectsDb())
     .select()
     .from(projects)
     .where(eq(projects.userId, userId))
@@ -25,7 +25,7 @@ export async function listProjects(userId: string) {
 
 // Every project linked to a GitHub repo and not finished: the commit sync's work list.
 export async function listProjectsWithRepo() {
-  return getDb()
+  return (await projectsDb())
     .select()
     .from(projects)
     .where(and(isNotNull(projects.repo), ne(projects.status, "done")))
@@ -36,14 +36,18 @@ export async function listProjectsWithRepo() {
 // title equal to the folder name.
 export async function findProjectForReport(userId: string, repo: string | null, folder: string) {
   if (repo) {
-    const [byRepo] = await getDb()
+    const [byRepo] = await (
+      await projectsDb()
+    )
       .select()
       .from(projects)
       .where(and(eq(projects.userId, userId), sql`lower(${projects.repo}) = ${repo.toLowerCase()}`))
       .limit(1);
     if (byRepo) return byRepo;
   }
-  const [byTitle] = await getDb()
+  const [byTitle] = await (
+    await projectsDb()
+  )
     .select()
     .from(projects)
     .where(
@@ -55,7 +59,9 @@ export async function findProjectForReport(userId: string, repo: string | null, 
 }
 
 export async function getProject(userId: string, projectId: string) {
-  const [row] = await getDb()
+  const [row] = await (
+    await projectsDb()
+  )
     .select()
     .from(projects)
     .where(and(eq(projects.userId, userId), eq(projects.id, projectId)))
@@ -71,7 +77,7 @@ export async function createProject(params: {
   summary?: string | null;
   repo?: string | null;
 }) {
-  const [row] = await getDb().insert(projects).values(params).returning();
+  const [row] = await (await projectsDb()).insert(projects).values(params).returning();
   return row;
 }
 
@@ -90,7 +96,9 @@ export async function updateProject(
   options: { metadata?: Record<string, unknown>; touch?: boolean } = {},
 ) {
   const now = new Date();
-  const [row] = await getDb()
+  const [row] = await (
+    await projectsDb()
+  )
     .update(projects)
     .set({
       ...patch,
@@ -106,7 +114,9 @@ export async function updateProject(
 }
 
 export async function deleteProject(userId: string, projectId: string) {
-  const [row] = await getDb()
+  const [row] = await (
+    await projectsDb()
+  )
     .delete(projects)
     .where(and(eq(projects.userId, userId), eq(projects.id, projectId)))
     .returning();
@@ -114,7 +124,7 @@ export async function deleteProject(userId: string, projectId: string) {
 }
 
 export async function listProjectEntries(userId: string, projectId: string, limit = 300) {
-  return getDb()
+  return (await projectsDb())
     .select()
     .from(projectEntries)
     .where(and(eq(projectEntries.userId, userId), eq(projectEntries.projectId, projectId)))
@@ -127,7 +137,7 @@ export async function listProjectSnapshots(userId: string, projectIds: string[])
   const openTodos = new Map<string, number>();
   const lastDone = new Map<string, { text: string; at: Date }>();
   if (projectIds.length === 0) return { openTodos, lastDone };
-  const db = getDb();
+  const db = await projectsDb();
   const counts = await db
     .select({ projectId: projectEntries.projectId, open: sql<number>`count(*)::int` })
     .from(projectEntries)
@@ -189,7 +199,9 @@ export async function insertProjectEntries(
   rows: Array<Omit<NewProjectEntry, "userId" | "projectId">>,
 ) {
   if (rows.length === 0) return [];
-  const inserted = await getDb()
+  const inserted = await (
+    await projectsDb()
+  )
     .insert(projectEntries)
     .values(rows.map((row) => ({ ...row, userId, projectId, metadata: row.metadata ?? {} })))
     .onConflictDoNothing()
@@ -214,7 +226,9 @@ export async function upsertProjectEntry(params: {
   metadata?: Record<string, unknown>;
 }) {
   const metadata = params.metadata ?? {};
-  const [row] = await getDb()
+  const [row] = await (
+    await projectsDb()
+  )
     .insert(projectEntries)
     .values({ ...params, metadata })
     .onConflictDoUpdate({
@@ -238,7 +252,7 @@ export async function replaceOpenEntries(params: {
   occurredAt: Date;
 }) {
   const keep = params.items.map((item) => item.externalId);
-  await getDb()
+  await (await projectsDb())
     .delete(projectEntries)
     .where(
       and(
@@ -270,7 +284,9 @@ export async function updateProjectEntry(
   patch: { text?: string; closedAt?: Date | null },
   onlyKind?: string,
 ) {
-  const [row] = await getDb()
+  const [row] = await (
+    await projectsDb()
+  )
     .update(projectEntries)
     .set({ ...patch, updatedAt: new Date() })
     .where(
@@ -286,7 +302,9 @@ export async function updateProjectEntry(
 }
 
 export async function deleteProjectEntry(userId: string, entryId: string) {
-  const [row] = await getDb()
+  const [row] = await (
+    await projectsDb()
+  )
     .delete(projectEntries)
     .where(and(eq(projectEntries.userId, userId), eq(projectEntries.id, entryId)))
     .returning();
@@ -296,7 +314,9 @@ export async function deleteProjectEntry(userId: string, entryId: string) {
 // "Updated" follows the latest real step: importing old commits does not make a project
 // look fresh.
 async function touchProject(userId: string, projectId: string, at = new Date()) {
-  await getDb()
+  await (
+    await projectsDb()
+  )
     .update(projects)
     .set({
       lastActivityAt: sql`greatest(${projects.lastActivityAt}, ${at.toISOString()}::timestamptz)`,

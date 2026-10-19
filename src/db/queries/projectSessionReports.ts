@@ -1,6 +1,6 @@
 import { eq, sql } from "drizzle-orm";
 
-import { getDb } from "../client";
+import { projectsDb } from "../ensureProjectsSchema";
 import { projectSessionReports, type ProjectSessionReport } from "../schema";
 
 // The newest report of a session replaces the previous one that was not processed yet.
@@ -21,7 +21,9 @@ export async function upsertSessionReport(params: {
     lastError: null,
     updatedAt: params.receivedAt,
   };
-  const [row] = await getDb()
+  const [row] = await (
+    await projectsDb()
+  )
     .insert(projectSessionReports)
     .values({
       userId: params.userId,
@@ -53,7 +55,7 @@ export async function claimDueSessionReports(params: {
   const waitBefore = new Date(params.now.getTime() - params.maxWaitMs).toISOString();
   const claimBefore = new Date(params.now.getTime() - params.staleClaimMs).toISOString();
   const t = projectSessionReports;
-  return getDb()
+  return (await projectsDb())
     .update(t)
     .set({ claimedAt: sql`${now}::timestamptz`, attempts: sql`${t.attempts} + 1` })
     .where(
@@ -83,7 +85,9 @@ export async function finishSessionReport(params: {
   at: Date;
 }) {
   const t = projectSessionReports;
-  await getDb()
+  await (
+    await projectsDb()
+  )
     .update(t)
     .set({
       processedHash: params.processedHash,
@@ -100,7 +104,9 @@ export async function finishSessionReport(params: {
 }
 
 export async function failSessionReport(id: string, error: string) {
-  await getDb()
+  await (
+    await projectsDb()
+  )
     .update(projectSessionReports)
     .set({ claimedAt: null, lastError: error.slice(0, 500), updatedAt: new Date() })
     .where(eq(projectSessionReports.id, id));
