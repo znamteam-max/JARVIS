@@ -28,6 +28,7 @@ export function useVoiceRecorder(onDone: (audio: Blob) => void): VoiceRecorder {
   const [error, setError] = useState<string | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const cancelledRef = useRef(false);
+  const aliveRef = useRef(true);
   const doneRef = useRef(onDone);
 
   useEffect(() => {
@@ -48,7 +49,12 @@ export function useVoiceRecorder(onDone: (audio: Blob) => void): VoiceRecorder {
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch {
-      setError(DENIED);
+      if (aliveRef.current) setError(DENIED);
+      return;
+    }
+    // The screen was closed while the phone asked for the microphone: let it go at once.
+    if (!aliveRef.current) {
+      stream.getTracks().forEach((track) => track.stop());
       return;
     }
     const mimeType = TYPES.find((type) => MediaRecorder.isTypeSupported?.(type));
@@ -94,7 +100,13 @@ export function useVoiceRecorder(onDone: (audio: Blob) => void): VoiceRecorder {
   }, [stop]);
 
   // Leaving the screen mid-recording sends nothing and frees the microphone.
-  useEffect(() => cancel, [cancel]);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      cancel();
+    };
+  }, [cancel]);
 
   const toggle = useCallback(() => {
     if (recorderRef.current) stop();

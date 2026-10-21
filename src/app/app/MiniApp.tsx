@@ -18,6 +18,7 @@ import {
 } from "@/domain/foodEdit";
 import type { MiniAppSummary } from "@/services/miniappSummary";
 
+import { openBackLayer, type BackLayer, type BackWindow } from "./backNavigation";
 import { confirmAction } from "./confirmAction";
 import styles from "./miniapp.module.css";
 import { ProjectsTab } from "./ProjectsTab";
@@ -71,6 +72,25 @@ export function MiniApp() {
   const [installPrompt, setInstallPrompt] = useState<InstallPrompt | null>(null);
   // The JARVIS window over any screen, with what was asked from home (if anything).
   const [jarvis, setJarvis] = useState<{ ask: JarvisAsk | null } | null>(null);
+  const jarvisOpen = Boolean(summary) && jarvis !== null;
+  const jarvisBack = useRef<BackLayer | null>(null);
+
+  // While the JARVIS window is open, "back" closes it: Telegram's Back button in the Mini App,
+  // the browser's back / Android gesture / iOS swipe elsewhere, Escape on a computer.
+  useEffect(() => {
+    if (!jarvisOpen) return;
+    const layer = openBackLayer(window as unknown as BackWindow, () => setJarvis(null));
+    jarvisBack.current = layer;
+    return () => {
+      layer.dispose();
+      if (jarvisBack.current === layer) jarvisBack.current = null;
+    };
+  }, [jarvisOpen]);
+
+  const closeJarvis = useCallback(() => {
+    if (jarvisBack.current) jarvisBack.current.close();
+    else setJarvis(null);
+  }, []);
 
   const initDataRef = useRef("");
   const startedRef = useRef(false);
@@ -158,6 +178,8 @@ export function MiniApp() {
     setMode(app?.initData ? "telegram" : "browser");
     // "Открыть разбор" in the coach's notification opens /app?tab=coach: the JARVIS window.
     const wanted = new URLSearchParams(window.location.search).get("tab");
+    // Read once: a reload after closing the window must not open it again.
+    if (wanted) window.history.replaceState(window.history.state, "", window.location.pathname);
     if (wanted === "coach" || wanted === "jarvis") {
       setJarvis({ ask: null });
     } else if (wanted && ["today", "plan", "projects", "food", "fitness"].includes(wanted)) {
@@ -256,14 +278,14 @@ export function MiniApp() {
           </button>
         ))}
       </nav>
-      {summary && jarvis ? (
+      {jarvisOpen && jarvis ? (
         <div className={styles.jarvisWindow} role="dialog" aria-modal="true" aria-label="JARVIS">
           <CoachTab
             api={api}
             mode={mode ?? "browser"}
             refresh={() => void call("/api/miniapp/summary")}
             ask={jarvis.ask}
-            close={() => setJarvis(null)}
+            close={closeJarvis}
           />
         </div>
       ) : null}
@@ -2179,6 +2201,7 @@ function CoachTab({
   const [sending, setSending] = useState(Boolean(ask));
   const [error, setError] = useState<string | null>(null);
   const [exportNote, setExportNote] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const firstAsk = useRef(ask);
@@ -2214,7 +2237,7 @@ function CoachTab({
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end" });
-  }, [messages, sending]);
+  }, [messages, sending, error]);
 
   async function run(init: RequestInit, optimistic: string) {
     setSending(true);
@@ -2277,6 +2300,16 @@ function CoachTab({
   // The whole chat as a .md file: downloaded in a browser, sent by the bot inside
   // Telegram (its web view cannot save files).
   async function exportHistory() {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      await sendHistoryFile();
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  async function sendHistoryFile() {
     setExportNote("Готовлю файл…");
     if (mode === "browser") {
       const response = await fetch("/api/miniapp/coach/export").catch(() => null);
@@ -2303,79 +2336,97 @@ function CoachTab({
 
   return (
     <>
-      <div className={styles.header}>
-        <div className={styles.headerText}>
-          <span className={styles.caption}>дела, еда, тренировки, проекты — пиши или говори</span>
-          <h1 className={styles.title}>JARVIS</h1>
-        </div>
-        <div className={styles.headerActions}>
-          <button
-            type="button"
-            className={styles.iconButton}
-            aria-label="Закрыть JARVIS"
-            onClick={() => {
-              voice.cancel();
-              close();
-            }}
+      {/* Stays on top while the conversation scrolls: the way out is always in sight. */}
+      <div className={styles.jarvisBar}>
+        <button
+          type="button"
+          className={styles.backButton}
+          aria-label="Назад: закрыть JARVIS"
+          onClick={() => {
+            voice.cancel();
+            close();
+          }}
+        >
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
           >
-            ✕
+            <path d="M15 5l-7 7 7 7" />
+          </svg>
+          Назад
+        </button>
+        <h1 className={styles.jarvisTitle}>JARVIS</h1>
+        <button
+          type="button"
+          className={styles.barAction}
+          aria-label="Выгрузить историю чата файлом"
+          disabled={exporting}
+          onClick={() => void exportHistory()}
+        >
+          История
+        </button>
+        {messages?.length ? (
+          <button type="button" className={styles.barAction} onClick={() => void reset()}>
+            Новый
           </button>
-          <button
-            type="button"
-            className={styles.secondary}
-            aria-label="Выгрузить историю чата файлом"
-            onClick={() => void exportHistory()}
-          >
-            История
-          </button>
-          {messages?.length ? (
-            <button type="button" className={styles.secondary} onClick={() => void reset()}>
-              Новый
-            </button>
-          ) : null}
-        </div>
+        ) : null}
       </div>
-      {exportNote ? <span className={styles.caption}>{exportNote}</span> : null}
-      {messages === null ? <span className={styles.caption}>Загружаю…</span> : null}
-      {messages?.length === 0 && !sending ? (
-        <div className={styles.card}>
-          <span>
-            Пиши как человеку: «напомни 21-го в 10 оплатить кружок», «перенеси ортодонта на
-            четверг», «съел гречку с курицей», «что мне делать на тренировке сегодня?». Я сделаю и
-            отвечу, что сделал. 📎 — FIT-файл тренировки, если её нет в Zwift.
-          </span>
-        </div>
+      {/* Right under the bar, so it is seen whatever part of the chat is on screen. */}
+      {exportNote ? (
+        <span className={styles.jarvisNote} role="status">
+          {exportNote}
+        </span>
       ) : null}
-      <div className={styles.chat}>
-        {messages?.map((message) =>
-          message.auto ? (
-            <div key={message.id} className={styles.autoNote}>
-              {message.content}
-            </div>
-          ) : (
-            <div
-              key={message.id}
-              className={message.role === "user" ? styles.bubbleUser : styles.bubbleCoach}
-            >
-              {message.role === "user" ? message.content : <Markdown text={message.content} />}
-              {message.role === "assistant" ? (
-                <div className={styles.bubbleMeta}>
-                  {[message.model ?? "модель не записана", chatTime(message.createdAt)]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </div>
-              ) : null}
-            </div>
-          ),
-        )}
-        {sending ? (
-          <div className={styles.bubbleCoach}>
-            <span className={styles.caption}>JARVIS думает… (до минуты)</span>
+      <div className={styles.jarvisBody}>
+        <span className={styles.caption}>дела, еда, тренировки, проекты — пиши или говори</span>
+        {messages === null ? <span className={styles.caption}>Загружаю…</span> : null}
+        {messages?.length === 0 && !sending ? (
+          <div className={styles.card}>
+            <span>
+              Пиши как человеку: «напомни 21-го в 10 оплатить кружок», «перенеси ортодонта на
+              четверг», «съел гречку с курицей», «что мне делать на тренировке сегодня?». Я сделаю и
+              отвечу, что сделал. 📎 — FIT-файл тренировки, если её нет в Zwift.
+            </span>
           </div>
         ) : null}
+        <div className={styles.chat}>
+          {messages?.map((message) =>
+            message.auto ? (
+              <div key={message.id} className={styles.autoNote}>
+                {message.content}
+              </div>
+            ) : (
+              <div
+                key={message.id}
+                className={message.role === "user" ? styles.bubbleUser : styles.bubbleCoach}
+              >
+                {message.role === "user" ? message.content : <Markdown text={message.content} />}
+                {message.role === "assistant" ? (
+                  <div className={styles.bubbleMeta}>
+                    {[message.model ?? "модель не записана", chatTime(message.createdAt)]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </div>
+                ) : null}
+              </div>
+            ),
+          )}
+          {sending ? (
+            <div className={styles.bubbleCoach}>
+              <span className={styles.caption}>JARVIS думает… (до минуты)</span>
+            </div>
+          ) : null}
+        </div>
+        {error ? <div className={styles.error}>{error}</div> : null}
         <div ref={endRef} />
       </div>
-      {error ? <div className={styles.error}>{error}</div> : null}
       <div className={styles.composer}>
         <VoiceStatus voice={voice} />
         <div className={styles.promptRow}>

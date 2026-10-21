@@ -519,6 +519,7 @@
 }
 
 .bubbleUser {
+  overflow-wrap: anywhere;
   align-self: flex-end;
   max-width: 85%;
   background: var(--accent);
@@ -540,6 +541,7 @@
 }
 
 .bubbleCoach {
+  overflow-wrap: anywhere;
   align-self: stretch;
   background: var(--surface);
   padding: 12px 14px;
@@ -863,6 +865,8 @@
   gap: 10px;
 }
 
+/* A full screen of its own: the bar stays on top, only the conversation scrolls, the input
+   stays at the bottom. */
 .jarvisWindow {
   position: fixed;
   inset: 0;
@@ -870,9 +874,9 @@
   background: var(--bg);
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding: calc(16px + env(safe-area-inset-top)) 16px calc(12px + env(safe-area-inset-bottom));
-  overflow-y: auto;
+  gap: 12px;
+  padding: calc(12px + env(safe-area-inset-top)) 16px calc(12px + env(safe-area-inset-bottom));
+  overflow: hidden;
 }
 
 .micActive {
@@ -884,4 +888,94 @@
 .recordingNote {
   font-size: 13px;
   color: #ff7a7d;
+}
+
+.jarvisBar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Big and on the left, where people look for the way back. */
+.backButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 44px;
+  padding: 0 14px 0 8px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.jarvisTitle {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-family: var(--font-display), sans-serif;
+  font-size: 20px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.barAction {
+  flex: none;
+  min-height: 44px;
+  padding: 0 10px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.jarvisBody {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.barAction:disabled {
+  opacity: 0.6;
+}
+
+.jarvisNote {
+  flex: none;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* Narrow phones: a tighter bar keeps «JARVIS» whole; on the narrowest only the buttons stay. */
+@media (max-width: 389px) {
+  .jarvisBar {
+    gap: 6px;
+  }
+
+  .barAction {
+    padding: 0 8px;
+  }
+
+  .jarvisTitle {
+    font-size: 16px;
+  }
+}
+
+@media (max-width: 340px) {
+  .jarvisTitle {
+    visibility: hidden;
+  }
 }
