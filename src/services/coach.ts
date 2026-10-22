@@ -311,6 +311,7 @@ export function conversationTranscript(
   timezone: string,
   assistantName: string,
   userName = "Владелец",
+  closing = "Ответь на последнее сообщение.",
 ) {
   const lines = history.map((message) => {
     const when = DateTime.fromJSDate(message.createdAt ?? new Date(), { zone: "utc" })
@@ -326,7 +327,7 @@ export function conversationTranscript(
           : userName;
     return `[${when}] ${who}: ${message.content}`;
   });
-  return `Переписка (последние сообщения, время местное):\n\n${lines.join("\n\n")}\n\nОтветь на последнее сообщение.`;
+  return `Переписка (последние сообщения, время местное):\n\n${lines.join("\n\n")}\n\n${closing}`;
 }
 
 // The coach also returns what to keep in her long memory: new facts she told about herself,

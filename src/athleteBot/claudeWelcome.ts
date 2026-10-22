@@ -2,12 +2,25 @@ import { z } from "zod";
 
 import { askClaudeJson, isAnthropicConfigured, isClaudeUnavailable } from "@/ai/anthropicClient";
 import { listApprovedAthletes } from "@/db/queries/athletes";
-import { getCoachProfile, insertCoachMessage, mergeCoachSettings } from "@/db/queries/coach";
-import { listActiveMemories, listHealthRecords } from "@/db/queries/coachMemory";
+import {
+  getCoachProfile,
+  insertCoachMessage,
+  listAllCoachMessages,
+  mergeCoachSettings,
+} from "@/db/queries/coach";
+import {
+  applyMemoryChanges,
+  listActiveMemories,
+  listHealthRecords,
+} from "@/db/queries/coachMemory";
 import type { User } from "@/db/schema";
 import { healthRecordsList } from "@/domain/athleteMemory";
 import { logger } from "@/lib/logger";
-import { buildCoachContext, TRIATHLON_COACH_INSTRUCTIONS } from "@/services/coach";
+import {
+  buildCoachContext,
+  conversationTranscript,
+  TRIATHLON_COACH_INSTRUCTIONS,
+} from "@/services/coach";
 
 import { ATHLETE_BOT_COMMANDS } from "./access";
 import { athleteBotApi, isAthleteBotConfigured, sendAthleteMarkdown } from "./telegram";
@@ -22,13 +35,8 @@ const KEY = "claudeWelcome";
 // A claim older than this without "sent" is a run that died (the 120 s limit): take it over.
 const CLAIM_LEASE_MS = 10 * 60 * 1000;
 const MAX_ATTEMPTS = 3;
-
-const WELCOME_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["message"],
-  properties: { message: { type: "string" } },
-};
+// Her whole chat so far fits easily; the cap only guards a very long one.
+const WELCOME_HISTORY_MESSAGES = 200;
 
 export function welcomeDue(state: WelcomeState | undefined, now: Date) {
   if (state?.sentAt) return false;
@@ -56,22 +64,56 @@ export function welcomeInstruction(params: { remembered: string | null; analyses
 ${params.analyses}`;
 }
 
+// Before writing, the coach reads everything she has written to the bot so far: what she
+// told about herself, asked for, disliked. What lasts goes to her long memory.
+export const HISTORY_INSTRUCTION = `Перед письмом прочитай всю вашу прошлую переписку (ниже, от старых сообщений к новым) и её профиль: что она рассказывала о себе, о чём просила, что ей не понравилось, как ей удобнее общаться. Раньше с ней работал более простой помощник — его советы могли противоречить её словам; опирайся на её слова и данные, а не на его выводы.
+В remember верни устойчивые факты о ней из этой переписки и профиля, которых ещё нет в «Что она рассказала о себе»: её нормы и ощущения, ограничения и здоровье, цели и старты, расписание, предпочтения в тренировках и в общении. Коротко, от третьего лица, не больше 10.
+В приветствии покажи одной-двумя фразами по делу, что ты всё это учёл (например, что знаешь её старт и как ей удобнее тренироваться). Не пересказывай переписку и не извиняйся за прошлого помощника.`;
+
+const WELCOME_WITH_MEMORY_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["message", "remember"],
+  properties: {
+    message: { type: "string" },
+    remember: { type: "array", items: { type: "string" } },
+  },
+};
+
 async function writeWelcome(user: User, now: Date, analyses: string) {
   const [first] = await listActiveMemories(user.id);
   const context = await buildCoachContext(user, now);
+  const history = conversationTranscript(
+    (await listAllCoachMessages(user.id)).slice(-WELCOME_HISTORY_MESSAGES),
+    user.timezone,
+    "Тренер",
+    "Спортсменка",
+    "Теперь напиши приветствие по инструкции.",
+  );
   const { data, model } = await askClaudeJson<unknown>({
     system: [
       { text: TRIATHLON_COACH_INSTRUCTIONS, cache: true },
       {
-        text: `${welcomeInstruction({ remembered: first?.fact ?? null, analyses })}\n\n# Данные\n${context}`,
+        text: `${welcomeInstruction({ remembered: first?.fact ?? null, analyses })}\n\n${HISTORY_INSTRUCTION}\n\n# Данные\n${context}`,
       },
     ],
-    content: "Напиши это сообщение.",
-    schema: WELCOME_SCHEMA,
-    effort: "medium",
+    content: history,
+    schema: WELCOME_WITH_MEMORY_SCHEMA,
+    effort: "high",
   });
-  const message = z.object({ message: z.string().trim().min(40) }).parse(data).message;
-  return { message, model };
+  const parsed = z
+    .object({
+      message: z.string().trim().min(40),
+      remember: z
+        .array(z.string())
+        .catch([])
+        .transform((facts) => facts.slice(0, 10)),
+    })
+    .parse(data);
+  await applyMemoryChanges({ userId: user.id, remember: parsed.remember, forget: [] }).catch(
+    () => undefined,
+  );
+  return { message: parsed.message, model };
 }
 
 // One athlete per scheduler tick, so a slow answer never pushes another past the time limit.

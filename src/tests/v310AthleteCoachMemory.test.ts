@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import { welcomeDue, welcomeInstruction } from "@/athleteBot/claudeWelcome";
+import { HISTORY_INSTRUCTION, welcomeDue, welcomeInstruction } from "@/athleteBot/claudeWelcome";
 import { classifyAthleteFile, safeError } from "@/athleteBot/handlers";
 import { normalizeFact } from "@/db/queries/coachMemory";
 import type { HealthItem } from "@/db/schema";
 import { healthRecordsBlock, healthRecordsList, memoryBlock } from "@/domain/athleteMemory";
 import { athleteNormsBlock, parseIntervalsAthlete } from "@/domain/athleteNorms";
-import { ATHLETE_MEMORY_RULES, TRIATHLON_COACH_INSTRUCTIONS } from "@/services/coach";
+import {
+  ATHLETE_MEMORY_RULES,
+  conversationTranscript,
+  TRIATHLON_COACH_INSTRUCTIONS,
+} from "@/services/coach";
 import { continuesRecord, mergeHealthItems, validLabDate } from "@/services/healthDocuments";
 
 // Every value here is made up: this repository is public.
@@ -176,5 +180,19 @@ describe("the one-time welcome", () => {
     expect(text).toContain("«Любит плавать по утрам»");
     expect(text).toContain("видит только она");
     expect(welcomeInstruction({ remembered: null, analyses: "" })).not.toContain("Например");
+  });
+
+  it("reads her whole chat first and keeps what it learned about her", () => {
+    expect(HISTORY_INSTRUCTION).toContain("всю вашу прошлую переписку");
+    expect(HISTORY_INSTRUCTION).toContain("В remember");
+    const transcript = conversationTranscript(
+      [{ role: "user", content: "Привет", createdAt: now, metadata: {} }],
+      "UTC",
+      "Тренер",
+      "Спортсменка",
+      "Теперь напиши приветствие по инструкции.",
+    );
+    expect(transcript).toContain("Спортсменка: Привет");
+    expect(transcript.endsWith("Теперь напиши приветствие по инструкции.")).toBe(true);
   });
 });
