@@ -49,6 +49,8 @@ const envSchema = z.object({
   ANTHROPIC_API_KEY: z.string().optional(),
   // The same key under the name the owner gave it in Vercel.
   ANFISA_ANTHROPIC_API_KEY: z.string().optional(),
+  // Needed only for an organization-wide key (Claude Console, Scope: Organization).
+  ANTHROPIC_WORKSPACE_ID: z.string().optional(),
   ATHLETE_CLAUDE_MODEL: z.string().default("claude-opus-5-5"),
   // Claude Code on the owner's Max subscription in a Cloudflare container.
   CLAUDE_RELAY_URL: z.string().url().optional(),

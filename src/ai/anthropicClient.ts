@@ -21,7 +21,12 @@ export function isAnthropicConfigured() {
 export function getAnthropicClient() {
   const key = apiKey();
   if (!key) throw new ClaudeApiError("anthropic_not_configured");
-  client ??= new Anthropic({ apiKey: key });
+  const workspace = getEnv().ANTHROPIC_WORKSPACE_ID;
+  // An organization-wide key must name the workspace on every request.
+  client ??= new Anthropic({
+    apiKey: key,
+    ...(workspace ? { defaultHeaders: { "anthropic-workspace-id": workspace } } : {}),
+  });
   return client;
 }
 
@@ -31,7 +36,8 @@ export function isClaudeUnavailable(error: unknown) {
   if (error instanceof Anthropic.PermissionDeniedError) return true;
   if (error instanceof Anthropic.APIError && error.status === 402) return true;
   return (
-    error instanceof Anthropic.BadRequestError && /credit|balance|billing/i.test(error.message)
+    error instanceof Anthropic.BadRequestError &&
+    /credit|balance|billing|workspace/i.test(error.message)
   );
 }
 

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { askClaudeJson, isAnthropicConfigured } from "@/ai/anthropicClient";
+import { askClaudeJson, isAnthropicConfigured, isClaudeUnavailable } from "@/ai/anthropicClient";
 import { listApprovedAthletes } from "@/db/queries/athletes";
 import { getCoachProfile, insertCoachMessage, mergeCoachSettings } from "@/db/queries/coach";
 import { listActiveMemories, listHealthRecords } from "@/db/queries/coachMemory";
@@ -102,7 +102,12 @@ export async function sendClaudeWelcomeIfDue(now = new Date()) {
         .catch(() => undefined);
       return { sent: 1 };
     } catch (error) {
-      // Not sent: the claim stays, and the lease lets a later tick try again (3 times at most).
+      // A key or balance problem is not the message's fault: no attempt is used up, and it
+      // goes out by itself once the key works.
+      if (isClaudeUnavailable(error)) {
+        await mergeCoachSettings(user.id, { [KEY]: { attempts: attempts - 1 } });
+      }
+      // Otherwise the claim stays, and the lease lets a later tick try again (3 at most).
       logger.warn("Coach welcome failed", {
         userId: user.id,
         attempts,
