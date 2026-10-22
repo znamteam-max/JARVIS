@@ -12,11 +12,13 @@ export function formatCoachChatExport(params: {
   >;
   timezone: string;
   now: Date;
+  // "Тренер" in the coach bot; JARVIS in the owner's app.
+  assistantName?: string;
 }) {
   const local = (date: Date) =>
     DateTime.fromJSDate(date, { zone: "utc" }).setZone(params.timezone).setLocale("ru");
   const lines = [
-    "# JARVIS — история чата",
+    `# ${params.assistantName ?? "JARVIS"} — история чата`,
     "",
     `Выгружено: ${local(params.now).toFormat("d MMMM yyyy, HH:mm")} (${params.timezone}). Сообщений: ${params.messages.length}.`,
   ];
@@ -39,8 +41,10 @@ export function formatCoachChatExport(params: {
       metadata.auto === true
         ? "Система — новые тренировки"
         : message.role === "assistant"
-          ? `JARVIS · ${chatModelLabel(metadata) ?? "модель не записана"}`
-          : "Вы";
+          ? `${params.assistantName ?? "JARVIS"} · ${chatModelLabel(metadata) ?? "модель не записана"}`
+          : params.assistantName
+            ? "Ты"
+            : "Вы";
     lines.push("", `### ${local(message.createdAt).toFormat("ccc dd.LL.yyyy HH:mm")} — ${who}`, "");
     lines.push(message.content.trim());
     const done = Array.isArray(metadata.done) ? (metadata.done as string[]) : [];
@@ -55,8 +59,14 @@ export function formatCoachChatExport(params: {
 export async function buildCoachChatExport(user: User, now = new Date()) {
   const messages = await listAllCoachMessages(user.id);
   const date = DateTime.fromJSDate(now, { zone: "utc" }).setZone(user.timezone).toISODate();
+  const athlete = user.role === "athlete";
   return {
-    fileName: `jarvis-chat-${date}.md`,
-    text: formatCoachChatExport({ messages, timezone: user.timezone, now }),
+    fileName: `${athlete ? "trener" : "jarvis"}-chat-${date}.md`,
+    text: formatCoachChatExport({
+      messages,
+      timezone: user.timezone,
+      now,
+      assistantName: athlete ? "Тренер" : undefined,
+    }),
   };
 }

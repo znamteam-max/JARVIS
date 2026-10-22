@@ -45,6 +45,21 @@ export async function fetchIntervals(
   return (await response.json()) as Array<Record<string, unknown>>;
 }
 
+// The athlete record: per-sport threshold HR, max HR, FTP and zones, resting HR.
+export async function fetchIntervalsAthlete(
+  credentials: IntervalsCredentials = ownerCredentials(),
+) {
+  const url = new URL(`${INTERVALS_API}/athlete/${encodeURIComponent(credentials.athleteId)}`);
+  const response = await fetch(url, { headers: intervalsHeaders(credentials), cache: "no-store" });
+  if (!response.ok) {
+    throw new IntervalsApiError(
+      `Intervals athlete request failed: ${response.status}`,
+      response.status,
+    );
+  }
+  return (await response.json()) as Record<string, unknown>;
+}
+
 export type IntervalsStream = { type: string; data: Array<number | null> | null };
 
 // Per-second data of one activity (seconds from start, watts, heart rate, cadence).

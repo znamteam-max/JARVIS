@@ -1,5 +1,8 @@
 import { DateTime } from "luxon";
 
+import { z } from "zod";
+
+import { askClaudeJson, isAnthropicConfigured } from "@/ai/anthropicClient";
 import { askClaudeRelay, isClaudeRelayConfigured } from "@/ai/claudeRelay";
 import { getOpenAIClient } from "@/ai/openaiClient";
 import { writeAudit } from "@/db/queries/audit";
@@ -12,9 +15,16 @@ import {
   listRideFilesSince,
   upsertRideFile,
 } from "@/db/queries/coach";
+import {
+  applyMemoryChanges,
+  listActiveMemories,
+  listHealthRecords,
+} from "@/db/queries/coachMemory";
 import { listFitnessActivitiesSince, listWellnessDaysSince } from "@/db/queries/fitness";
 import type { CoachMessage, User } from "@/db/schema";
 import { activityWatts, withoutWatchDuplicates } from "@/domain/activityDedupe";
+import { healthRecordsBlock, memoryBlock } from "@/domain/athleteMemory";
+import { athleteNormsBlock, type IntervalsSportSettings } from "@/domain/athleteNorms";
 import { chatModelLabel } from "@/domain/chatModelLabel";
 import { recentLoadBlock } from "@/domain/recentLoad";
 import { formatRideForCoach, type RideSummary } from "@/domain/rideAnalysis";
@@ -28,6 +38,8 @@ import { buildMiniAppSummary, type MiniAppSummary } from "@/services/miniappSumm
 const HISTORY_MESSAGES = 40;
 const DAILY_QUESTION_LIMIT = 60;
 const CLAUDE_TIMEOUT_MS = 90_000;
+// Opus with effort "high" for an athlete; the coach bot's route allows 120 s.
+const ATHLETE_CLAUDE_TIMEOUT_MS = 85_000;
 const REVIEW_IN_CONTEXT_CHARS = 1800;
 const DEFAULT_FTP = 300;
 // Only for IF/TSS of an uploaded FIT file when an athlete has not set /ftp yet.
@@ -69,8 +81,15 @@ export const TRIATHLON_COACH_INSTRUCTIONS = `Ты — личный тренер 
 - «Заезды с мощностью» — посекундный разбор велотренировок с мощностью (Zwift).
 - «Все тренировки» (Intervals.icu: часы Garmin и Zwift): бег — темп на км и пульс; плавание — дистанция и темп на 100 м; велосипед — мощность (Zwift) или скорость и пульс. Если в то же время есть и запись часов, и заезд Zwift — это одна тренировка, дубли часов уже убраны.
 - Сон, HRV и пульс покоя с часов Garmin.
+- «Что она рассказала о себе» — её собственные слова о себе, сохранённые из прошлых разговоров. Помни их всегда.
+- «Её нормы» — её обычный пульс и темп по её же тренировкам и зоны из Intervals.icu.
+- «Анализы» — её результаты анализов с датами.
 
 Как тренер:
+- О себе говори в мужском роде («понял», «записал»).
+- Пульс и темп оценивай относительно «Её норм» и того, что она рассказала о себе, а не по общим формулам. Если она сказала, что что-то для неё нормально, — это факт: не спорь и не пугай; обращай внимание только на заметные отклонения от её же нормы.
+- Анализы учитывай в советах (для выносливости особенно важны гемоглобин, ферритин и железо), объясняй простыми словами, без диагнозов; при отклонениях советуй обсудить с врачом. Не пересказывай анализы без повода.
+- Эту переписку и её анализы видит только она. Не предлагай чем-то делиться с другими, если она сама не попросит.
 - Веди подготовку к старту по периодам (база → развитие → пик → подводка), считая недели до даты старта из профиля. Баланс трёх видов — по её слабым местам; силовая 1–2 раза в неделю; связки «велосипед → бег» ближе к сезону; в плавании — техника и открытая вода.
 - Длинные тренировки наращивай постепенно (примерно до +10% в неделю); после 3 недель роста — разгрузочная неделя.
 - Когда спрашивают, что делать сегодня, — одна конкретная тренировка: вид, длительность, структура, интенсивность (пульс, темп или ватты), еда и вода — и в 1–2 строках почему. Если по данным лучше отдых — скажи прямо.
@@ -212,9 +231,27 @@ export async function buildCoachContext(
     );
   if (!summary) {
     const ftp = athleteFtp(settings, workouts);
+    const [memories, records, twoMonths] = await Promise.all([
+      listActiveMemories(user.id),
+      listHealthRecords(user.id),
+      listFitnessActivitiesSince(user.id, local.minus({ days: 60 }).toJSDate()),
+    ]);
+    const intervals = settings.intervals as
+      | { sports: IntervalsSportSettings[]; restingHr: number | null }
+      | undefined;
     return [
       `Сейчас: ${local.toFormat("cccc, d MMMM yyyy, HH:mm")} (${tz}).`,
       `Настройки: FTP ${ftp ? `${ftp} Вт` : "не задан"}${settings.hrMax ? `, HRmax ${settings.hrMax}` : ""}${settings.weightKg ? `, вес ~${settings.weightKg} кг` : ""}.`,
+      "",
+      memoryBlock(memories),
+      "",
+      athleteNormsBlock({
+        activities: withoutWatchDuplicates(twoMonths),
+        restingHr: wellness
+          .map((day) => day.restingHr)
+          .filter((value): value is number => typeof value === "number" && value > 0),
+        intervals: intervals ?? null,
+      }),
       "",
       recentLoadBlock({ activities: workouts, now, timezone: tz }),
       "",
@@ -222,6 +259,8 @@ export async function buildCoachContext(
       "",
       "## Профиль (от спортсменки)",
       profile?.profile ?? "Профиль ещё не заполнен.",
+      "",
+      healthRecordsBlock(records),
       "",
       "## Заезды с мощностью (посекундный разбор), 6 недель",
       rideLines.length ? rideLines.join("\n") : "Нет заездов с мощностью.",
@@ -290,6 +329,76 @@ export function conversationTranscript(
   return `Переписка (последние сообщения, время местное):\n\n${lines.join("\n\n")}\n\nОтветь на последнее сообщение.`;
 }
 
+// The coach also returns what to keep in her long memory: new facts she told about herself,
+// and facts she took back. One request, so memory costs no extra wait.
+export const ATHLETE_MEMORY_RULES = `Ответ возвращай в JSON: reply — текст ответа ей; remember — новые устойчивые факты о ней из её последних сообщений: здоровье и ограничения, её нормы и ощущения (например «утренний пульс у неё обычно выше среднего, и это её норма»), цели и старты, расписание и быт, что ей нравится или не нравится в тренировках. Коротко, от третьего лица, одна мысль — один пункт, не больше 10 за раз. Не повторяй то, что уже есть в «Что она рассказала о себе». Не сохраняй разовые события и цифры тренировок — они и так в данных. forget — текст пунктов из «Что она рассказала о себе» (без дефиса в начале), которые она опровергла или которые устарели. Если менять нечего — пустые списки.`;
+
+const ATHLETE_ANSWER_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["reply", "remember", "forget"],
+  properties: {
+    reply: { type: "string" },
+    remember: { type: "array", items: { type: "string" } },
+    forget: { type: "array", items: { type: "string" } },
+  },
+};
+
+const athleteAnswerSchema = z.object({
+  reply: z.string(),
+  // A long list is cut, never a reason to lose the answer itself.
+  remember: z
+    .array(z.string())
+    .catch([])
+    .transform((facts) => facts.slice(0, 10)),
+  forget: z
+    .array(z.string())
+    .catch([])
+    .transform((facts) => facts.slice(0, 20)),
+});
+
+async function answerAthleteWithClaude(params: {
+  user: User;
+  context: string;
+  transcript: string;
+  metadata?: Record<string, unknown>;
+}) {
+  const { data, model } = await askClaudeJson<unknown>({
+    system: [
+      { text: `${TRIATHLON_COACH_INSTRUCTIONS}\n\n${ATHLETE_MEMORY_RULES}`, cache: true },
+      { text: params.context },
+    ],
+    content: params.transcript,
+    schema: ATHLETE_ANSWER_SCHEMA,
+    effort: "medium",
+    timeoutMs: ATHLETE_CLAUDE_TIMEOUT_MS,
+  });
+  const answer = athleteAnswerSchema.parse(data);
+  const text = answer.reply.trim();
+  if (!text) throw new Error("Coach returned an empty answer");
+  await applyMemoryChanges({
+    userId: params.user.id,
+    remember: answer.remember,
+    forget: answer.forget,
+  }).catch((error) =>
+    logger.warn("Coach memory update failed", {
+      error: error instanceof Error ? error.message : String(error),
+    }),
+  );
+  await insertCoachMessage({
+    userId: params.user.id,
+    role: "assistant",
+    content: text,
+    metadata: {
+      ...params.metadata,
+      engine: "anthropic",
+      model,
+      remembered: answer.remember.length,
+    },
+  });
+  return text;
+}
+
 // Claude (owner's subscription, via the Cloudflare relay) answers first; OpenAI steps in
 // when the relay is not configured or fails, so the chat is never silent.
 export async function generateCoachReply(
@@ -319,7 +428,17 @@ export async function generateCoachReply(
     "Тренер",
     athlete ? "Спортсменка" : "Владелец",
   );
-  // The owner's Max subscription is the owner's alone: athletes are answered by OpenAI.
+  // Athletes: Claude Opus by their own API key, with long memory. When it fails the answer
+  // fails too: no quiet switch to a weaker model (the owner asked for "Opus always").
+  if (athlete && isAnthropicConfigured()) {
+    return answerAthleteWithClaude({
+      user,
+      context: [extraInstruction, `# Данные\n${context}`].filter(Boolean).join("\n\n"),
+      transcript,
+      metadata: options.metadata,
+    });
+  }
+  // The owner's Max subscription is the owner's alone: athletes never go through the relay.
   if (!athlete && options.engine !== "openai" && isClaudeRelayConfigured()) {
     try {
       const answer = await askClaudeRelay({

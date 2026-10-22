@@ -1,7 +1,8 @@
 import { after, NextResponse } from "next/server";
 
+import { sendClaudeWelcomeIfDue } from "@/athleteBot/claudeWelcome";
 import { runDueReminders } from "@/jobs/runDueReminders";
-import { reviewNewWorkoutsIfDue } from "@/services/coachReviews";
+import { reviewAthleteWorkoutsIfDue, reviewNewWorkoutsIfDue } from "@/services/coachReviews";
 import { backfillFoodPhotos } from "@/services/foodPhotos";
 import { syncGithubProjectsIfDue } from "@/services/projectGithubSync";
 import { processDueSessionReports } from "@/services/projectSessionReports";
@@ -35,6 +36,22 @@ export async function POST(request: Request) {
   after(() =>
     reviewNewWorkoutsIfDue().catch((error) =>
       logger.warn("Coach review tick failed", {
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    ),
+  );
+  // The coach bot's athletes get their reviews in a call of their own.
+  after(() =>
+    reviewAthleteWorkoutsIfDue().catch((error) =>
+      logger.warn("Athlete review tick failed", {
+        error: error instanceof Error ? error.name : "unknown",
+      }),
+    ),
+  );
+  // The new Claude coach introduces itself to each athlete once.
+  after(() =>
+    sendClaudeWelcomeIfDue().catch((error) =>
+      logger.warn("Coach welcome tick failed", {
         error: error instanceof Error ? error.message : String(error),
       }),
     ),

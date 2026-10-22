@@ -141,6 +141,13 @@
       "when": 1792857600000,
       "tag": "0019_project_session_reports",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1792944000000,
+      "tag": "0020_coach_memory",
+      "breakpoints": true
     }
   ]
 }

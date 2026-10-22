@@ -23,6 +23,8 @@ export const ATHLETE_BOT_COMMANDS = [
   { command: "intervals", description: "Подключить Intervals.icu (Garmin, Zwift)" },
   { command: "profile", description: "Профиль: старт, цель, уровень, время" },
   { command: "ftp", description: "Задать FTP, например /ftp 210" },
+  { command: "memory", description: "Что тренер о тебе помнит" },
+  { command: "analyses", description: "Твои анализы" },
   { command: "new", description: "Начать новый разговор" },
   { command: "export", description: "История переписки файлом" },
 ];

@@ -44,6 +44,12 @@ const envSchema = z.object({
   ATHLETE_BOT_TOKEN: z.string().optional(),
   // The same token under the name the owner gave it in Vercel.
   ANFISAKRASOTKA_BOT_TOKEN: z.string().optional(),
+  // Claude by API key (Claude Console) for the coach bot's athletes: their own billing,
+  // not the owner's Max subscription.
+  ANTHROPIC_API_KEY: z.string().optional(),
+  // The same key under the name the owner gave it in Vercel.
+  ANFISA_ANTHROPIC_API_KEY: z.string().optional(),
+  ATHLETE_CLAUDE_MODEL: z.string().default("claude-opus-5-5"),
   // Claude Code on the owner's Max subscription in a Cloudflare container.
   CLAUDE_RELAY_URL: z.string().url().optional(),
   CLAUDE_RELAY_TOKEN: z.string().optional(),

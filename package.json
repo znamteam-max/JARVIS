@@ -20,6 +20,7 @@
     "telegram:webhook": "tsx scripts/set-telegram-webhook.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.1.0",
     "@garmin/fitsdk": "21.217.0",
     "@opentelemetry/api": "^1.9.1",
     "dotenv": "^17.4.2",

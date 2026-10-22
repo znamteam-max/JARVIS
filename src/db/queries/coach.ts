@@ -24,6 +24,16 @@ export async function saveCoachProfile(params: {
     .onConflictDoUpdate({ target: coachProfiles.userId, set: values });
 }
 
+// Adds keys to the coach settings without touching the profile text.
+export async function mergeCoachSettings(userId: string, patch: Record<string, unknown>) {
+  const current = await getCoachProfile(userId);
+  await saveCoachProfile({
+    userId,
+    profile: current?.profile ?? "",
+    settings: { ...(current?.settings ?? {}), ...patch },
+  });
+}
+
 export async function listActiveCoachMessages(userId: string, limit: number) {
   const rows = await getDb()
     .select()
@@ -73,6 +83,9 @@ export async function getLatestCoachReview(userId: string) {
         eq(coachMessages.userId, userId),
         eq(coachMessages.role, "assistant"),
         gte(coachMessages.createdAt, trigger.createdAt),
+        // A welcome or a lab-results summary written after the trigger is not the review.
+        sql`${coachMessages.metadata}->>'welcome' is null`,
+        sql`${coachMessages.metadata}->>'healthRecordId' is null`,
       ),
     )
     .orderBy(asc(coachMessages.createdAt))

@@ -11,7 +11,21 @@ import {
   insertCoachMessage,
   saveCoachProfile,
 } from "@/db/queries/coach";
+import {
+  deleteHealthRecordAt,
+  listActiveMemories,
+  listHealthRecords,
+  removeMemoryAt,
+} from "@/db/queries/coachMemory";
 import { getUserById } from "@/db/queries/users";
+import { isAnthropicConfigured, isClaudeUnavailable } from "@/ai/anthropicClient";
+import { getBot } from "@/bot/createBot";
+import { formatTakenOn, healthRecordsList } from "@/domain/athleteMemory";
+import {
+  isSupportedHealthType,
+  readHealthDocument,
+  saveHealthDocument,
+} from "@/services/healthDocuments";
 import type { AthleteConnection, User } from "@/db/schema";
 import { encryptSecret } from "@/integrations/encryption";
 import { fetchIntervals, IntervalsApiError } from "@/integrations/intervals";
@@ -32,13 +46,43 @@ import {
 } from "./telegram";
 
 const MAX_FIT_BYTES = 8 * 1024 * 1024;
+const MAX_HEALTH_BYTES = 15 * 1024 * 1024;
+// Claude takes images up to 5 MB; Telegram's own photo compression stays far below.
+const MAX_IMAGE_BYTES = 4.5 * 1024 * 1024;
+const OWNER_ALERT_EVERY_MS = 60 * 60 * 1000;
+let lastOwnerAlertAt = 0;
+
+// Errors of the coach bot without her data: a failed query's message carries its parameters.
+export function safeError(error: unknown) {
+  if (!(error instanceof Error)) return "unknown";
+  const code = (error as { cause?: { code?: unknown } }).cause?.code;
+  return /query|insert|update|select|delete/i.test(error.message)
+    ? `${error.name}${code ? ` ${String(code)}` : ""}`
+    : error.message.slice(0, 200);
+}
+
+// The key is wrong or the balance is empty: the owner hears it in JARVIS, at most hourly.
+async function alertOwnerClaudeUnavailable(error: unknown) {
+  if (Date.now() - lastOwnerAlertAt < OWNER_ALERT_EVERY_MS) return;
+  lastOwnerAlertAt = Date.now();
+  const [ownerTelegramId] = [...getAllowedTelegramUserIds()];
+  if (!ownerTelegramId) return;
+  await getBot()
+    .api.sendMessage(
+      ownerTelegramId,
+      `⚠️ Тренер в тренерском боте не может ответить: Claude API отказал (${error instanceof Error ? error.message.slice(0, 120) : "ошибка"}). Проверьте ключ и баланс в Claude Console.`,
+    )
+    .catch(() => undefined);
+}
 
 type TelegramMessage = {
   message_id: number;
   from?: { id: number; is_bot?: boolean; username?: string; first_name?: string };
   chat: { id: number; type: string };
   text?: string;
-  document?: { file_id: string; file_name?: string; file_size?: number };
+  caption?: string;
+  document?: { file_id: string; file_name?: string; file_size?: number; mime_type?: string };
+  photo?: Array<{ file_id: string; file_size?: number; width?: number; height?: number }>;
 };
 
 export type TelegramUpdate = { update_id: number; message?: TelegramMessage };
@@ -202,17 +246,24 @@ async function handleOwner(message: TelegramMessage) {
   switch (command) {
     case "intervals":
       return connectIntervals(user, message, text, user.telegramUserId);
-    case "profile":
-      if (rest) {
-        await saveAthleteProfile(user, rest);
+    case "profile": {
+      // Her chat, memory and analyses are hers: the owner may start a profile, never read
+      // it, and never overwrite what she wrote herself.
+      const current = await getCoachProfile(user.id);
+      const hers = current?.settings?.profileBy === "athlete";
+      if (rest && !hers) {
+        await saveAthleteProfile(user, rest, "owner");
         await sendAthleteText(chatId, `✅ Профиль «${name}» сохранён.`);
         return;
       }
       await sendAthleteText(
         chatId,
-        `Профиль «${name}»:\n\n${(await getCoachProfile(user.id))?.profile?.trim() || "пусто"}\n\n${PROFILE_TEMPLATE}`,
+        hers
+          ? `Профиль «${name}» заполнен ею самой — менять и читать его отсюда нельзя.`
+          : `Профиль «${name}» ${current?.profile?.trim() ? "заполнен" : "пуст"}. Заменить: /profile и новый текст целиком.`,
       );
       return;
+    }
     case "ftp": {
       const ftp = await saveAthleteFtp(user, rest);
       await sendAthleteText(
@@ -229,9 +280,13 @@ async function handleOwner(message: TelegramMessage) {
   }
 }
 
-async function saveAthleteProfile(user: User, text: string) {
+async function saveAthleteProfile(user: User, text: string, by: "athlete" | "owner") {
   const current = await getCoachProfile(user.id);
-  await saveCoachProfile({ userId: user.id, profile: text, settings: current?.settings ?? {} });
+  await saveCoachProfile({
+    userId: user.id,
+    profile: text,
+    settings: { ...(current?.settings ?? {}), profileBy: by },
+  });
 }
 
 async function saveAthleteFtp(user: User, raw: string) {
@@ -272,6 +327,81 @@ async function answerQuestion(user: User, chatId: number, text: string) {
   }
 }
 
+async function downloadTelegramFile(fileId: string) {
+  const file = await athleteBotApi().getFile(fileId);
+  const response = await fetch(
+    `https://api.telegram.org/file/bot${athleteBotToken()}/${file.file_path}`,
+  );
+  if (!response.ok) throw new Error(`telegram_file_${response.status}`);
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+// What a file in the chat is: a workout (.fit), lab results (photo, image or PDF), or neither.
+export function classifyAthleteFile(message: {
+  photo?: unknown[];
+  document?: { file_name?: string; mime_type?: string };
+}) {
+  if (message.photo?.length) return { kind: "health" as const, mediaType: "image/jpeg" };
+  const document = message.document;
+  if (!document) return null;
+  if (/\.fit$/i.test(document.file_name ?? "")) return { kind: "fit" as const, mediaType: null };
+  if (isSupportedHealthType(document.mime_type)) {
+    return { kind: "health" as const, mediaType: document.mime_type };
+  }
+  return { kind: "unknown" as const, mediaType: null };
+}
+
+async function readHealthFile(user: User, message: TelegramMessage, mediaType: string) {
+  const chatId = message.chat.id;
+  if (!isAnthropicConfigured() || !isSupportedHealthType(mediaType)) {
+    await sendAthleteText(chatId, "Этот файл прочитать не могу. Пришли фото или PDF анализов.");
+    return;
+  }
+  const photo = message.photo?.at(-1);
+  const fileId = photo?.file_id ?? message.document?.file_id;
+  const size = photo?.file_size ?? message.document?.file_size ?? 0;
+  const limit = mediaType === "application/pdf" ? MAX_HEALTH_BYTES : MAX_IMAGE_BYTES;
+  if (!fileId || size > limit) {
+    await sendAthleteText(
+      chatId,
+      mediaType === "application/pdf"
+        ? "PDF слишком большой. Пришли файл до 15 МБ или фото страниц."
+        : "Картинка слишком большая. Пришли её обычным фото (не файлом) или PDF.",
+    );
+    return;
+  }
+  const stop = keepTyping(chatId);
+  try {
+    const result = await readHealthDocument({
+      bytes: await downloadTelegramFile(fileId),
+      mediaType,
+      caption: message.caption ?? null,
+    });
+    if (!result.isLabResult) {
+      stop();
+      await sendAthleteText(
+        chatId,
+        "Не похоже на результаты анализов. Я читаю фото и PDF анализов и файлы тренировок .fit, а мысли и вопросы — обычным текстом.",
+      );
+      return;
+    }
+    const { record, merged } = await saveHealthDocument({ user, result });
+    stop();
+    const when = record.takenOn ? ` от ${formatTakenOn(record.takenOn)}` : "";
+    await sendAthleteMarkdown(
+      chatId,
+      merged
+        ? `🧪 Добавил к «${record.title}»${when}: теперь ${record.items.length} показ.`
+        : `🧪 Сохранил: «${record.title}»${when}, ${record.items.length} показ.\n\n${result.summary}\n\nВсе анализы — /analyses`,
+    );
+  } finally {
+    stop();
+  }
+  // «Что скажешь?» under the photo is a question: answered with the new record in sight.
+  const question = message.caption?.trim();
+  if (question) await answerQuestion(user, chatId, question);
+}
+
 async function reviewFitFile(user: User, message: TelegramMessage) {
   const document = message.document!;
   const chatId = message.chat.id;
@@ -281,14 +411,9 @@ async function reviewFitFile(user: User, message: TelegramMessage) {
   }
   const stop = keepTyping(chatId);
   try {
-    const file = await athleteBotApi().getFile(document.file_id);
-    const response = await fetch(
-      `https://api.telegram.org/file/bot${athleteBotToken()}/${file.file_path}`,
-    );
-    if (!response.ok) throw new Error(`telegram_file_${response.status}`);
     const messages = await uploadRideToCoach({
       user,
-      bytes: new Uint8Array(await response.arrayBuffer()),
+      bytes: await downloadTelegramFile(document.file_id),
       fileName: document.file_name ?? null,
     });
     const review = [...messages].reverse().find((item) => item.role === "assistant");
@@ -305,9 +430,23 @@ async function handleApproved(user: User, connection: AthleteConnection, message
   const command = commandOf(text);
   const rest = command ? text.replace(/^\/\S+\s*/, "").trim() : text;
 
-  if (message.document) return reviewFitFile(user, message);
+  const file = classifyAthleteFile(message);
+  if (file?.kind === "fit") return reviewFitFile(user, message);
+  if (file?.kind === "health" && file.mediaType) {
+    return readHealthFile(user, message, file.mediaType);
+  }
+  if (file?.kind === "unknown") {
+    await sendAthleteText(
+      chatId,
+      "Этот файл не прочитаю. Понимаю фото и PDF анализов и файлы тренировок .fit. Снимок с iPhone (HEIC) отправь обычным фото, не файлом.",
+    );
+    return;
+  }
   if (!text) {
-    await sendAthleteText(chatId, "Пока понимаю текст и файлы тренировок .fit.");
+    await sendAthleteText(
+      chatId,
+      "Понимаю текст, фото и PDF анализов и файлы тренировок .fit. Голосовые пока не слушаю.",
+    );
     return;
   }
   switch (command) {
@@ -321,7 +460,7 @@ async function handleApproved(user: User, connection: AthleteConnection, message
       return connectIntervals(user, message, text);
     case "profile": {
       if (rest) {
-        await saveAthleteProfile(user, rest);
+        await saveAthleteProfile(user, rest, "athlete");
         await sendAthleteText(
           chatId,
           "✅ Профиль сохранён. Тренер будет опираться на него; обновить — снова /profile и новый текст целиком.",
@@ -340,6 +479,46 @@ async function handleApproved(user: User, connection: AthleteConnection, message
       await sendAthleteText(
         chatId,
         ftp ? `✅ FTP ${ftp} Вт сохранён.` : "Напиши FTP в ваттах, например: /ftp 210",
+      );
+      return;
+    }
+    case "memory": {
+      const memories = await listActiveMemories(user.id);
+      await sendAthleteText(
+        chatId,
+        memories.length
+          ? `Что я о тебе помню:\n\n${memories.map((memory, index) => `${index + 1}. ${memory.fact}`).join("\n")}\n\nЕсли что-то не так — /forget и номер пункта, например /forget 2. А новое просто расскажи в чате.`
+          : "Пока ничего не запомнил. Расскажи о себе обычным сообщением — что важно знать тренеру, я запомню.",
+      );
+      return;
+    }
+    case "forget": {
+      const removed = await removeMemoryAt(user.id, Number(rest));
+      await sendAthleteText(
+        chatId,
+        removed
+          ? `Забыл: «${removed.fact}».`
+          : "Напиши номер пункта из /memory, например /forget 2.",
+      );
+      return;
+    }
+    case "analyses": {
+      const records = await listHealthRecords(user.id);
+      await sendAthleteText(
+        chatId,
+        records.length
+          ? `Твои анализы:\n\n${healthRecordsList(records)}\n\nНовые — пришли фото или PDF прямо сюда. Удалить — /analyses_delete и номер.`
+          : "Анализов пока нет. Пришли фото или PDF результатов прямо сюда — я их прочитаю и сохраню.",
+      );
+      return;
+    }
+    case "analyses_delete": {
+      const removed = await deleteHealthRecordAt(user.id, Number(rest));
+      await sendAthleteText(
+        chatId,
+        removed
+          ? `Удалил: ${removed.title} от ${formatTakenOn(removed.takenOn)}.`
+          : "Напиши номер из /analyses, например /analyses_delete 3.",
       );
       return;
     }
@@ -407,10 +586,15 @@ export async function handleAthleteUpdate(update: TelegramUpdate) {
       await sendAthleteText(message.chat.id, error.message);
       return;
     }
-    logger.warn("Coach bot message failed", {
-      userId: user.id,
-      error: error instanceof Error ? error.message : String(error),
-    });
+    logger.warn("Coach bot message failed", { userId: user.id, error: safeError(error) });
+    if (isClaudeUnavailable(error)) {
+      await alertOwnerClaudeUnavailable(error);
+      await sendAthleteText(
+        message.chat.id,
+        "Тренер сейчас недоступен — его уже чинят. Напиши чуть позже, я отвечу.",
+      ).catch(() => undefined);
+      return;
+    }
     await sendAthleteText(
       message.chat.id,
       "Не получилось ответить. Попробуй ещё раз через минуту.",

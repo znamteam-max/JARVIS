@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import {
   bigint,
   boolean,
+  date,
   index,
   integer,
   jsonb,
@@ -909,6 +910,51 @@ export const coachProfiles = assistantTable("coach_profiles", {
   ...timestamps,
 });
 
+// What an athlete told the coach about themselves ("this is my normal"): kept
+// apart from the chat, so it stays in the coach's sight however long the chat gets.
+export const coachMemories = assistantTable(
+  "coach_memories",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    fact: text("fact").notNull(),
+    // active | removed
+    status: text("status").notNull().default("active"),
+    ...timestamps,
+  },
+  (table) => [index("coach_memories_user_status_idx").on(table.userId, table.status)],
+);
+
+// Lab results an athlete sent (photo/PDF) or that were added for them: one test date each.
+export const healthRecords = assistantTable(
+  "health_records",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    takenOn: date("taken_on", { mode: "string" }),
+    lab: text("lab"),
+    title: text("title").notNull(),
+    items: jsonb("items").$type<HealthItem[]>().notNull().default(emptyArrayJson),
+    summary: text("summary").notNull(),
+    source: text("source").notNull().default("upload"),
+    ...timestamps,
+  },
+  (table) => [index("health_records_user_taken_idx").on(table.userId, table.takenOn)],
+);
+
+export type HealthItem = {
+  name: string;
+  value: string;
+  unit: string;
+  reference: string;
+  // low | high | normal | unknown
+  flag: string;
+};
+
 export const coachMessages = assistantTable(
   "coach_messages",
   {
@@ -945,6 +991,8 @@ export const rideFiles = assistantTable(
 );
 
 export type CoachMessage = typeof coachMessages.$inferSelect;
+export type CoachMemory = typeof coachMemories.$inferSelect;
+export type HealthRecord = typeof healthRecords.$inferSelect;
 export type RideFile = typeof rideFiles.$inferSelect;
 export type FitnessActivity = typeof fitnessActivities.$inferSelect;
 export type WellnessDay = typeof wellnessDays.$inferSelect;

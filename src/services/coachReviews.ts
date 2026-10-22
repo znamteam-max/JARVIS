@@ -105,30 +105,33 @@ export async function reviewNewWorkoutsIfDue(now = new Date()) {
   if (!canUseOpenAI()) return { reviewed: 0, reason: "no_openai" };
   const [ownerTelegramId] = [...getAllowedTelegramUserIds()];
   const owner = ownerTelegramId ? await getUserByTelegramId(ownerTelegramId) : null;
-  const ownerResult = owner
-    ? await reviewForUser({ user: owner, now, notify: (text) => notifyOwner(owner, text) })
+  return owner
+    ? reviewForUser({ user: owner, now, notify: (text) => notifyOwner(owner, text) })
     : { reviewed: 0, reason: "owner_unknown" };
+}
 
+// The coach bot's athletes, in their own after() call: a slow Opus answer for one of them
+// never eats into the owner's review time, nor the other way round.
+export async function reviewAthleteWorkoutsIfDue(now = new Date()) {
+  if (!isAthleteBotConfigured()) return { athletesReviewed: 0 };
   let athletesReviewed = 0;
-  if (isAthleteBotConfigured()) {
-    for (const { connection, user } of await listConnectedAthletes()) {
-      try {
-        const result = await reviewForUser({
-          user,
-          now,
-          credentials: athleteIntervalsCredentials(connection),
-          notify: (text) => sendAthleteMarkdown(user.telegramUserId, text),
-        });
-        athletesReviewed += result.reviewed;
-      } catch (error) {
-        logger.warn("Athlete workout review failed", {
-          userId: user.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+  for (const { connection, user } of await listConnectedAthletes()) {
+    try {
+      const result = await reviewForUser({
+        user,
+        now,
+        credentials: athleteIntervalsCredentials(connection),
+        notify: (text) => sendAthleteMarkdown(user.telegramUserId, text),
+      });
+      athletesReviewed += result.reviewed;
+    } catch (error) {
+      logger.warn("Athlete workout review failed", {
+        userId: user.id,
+        error: error instanceof Error ? error.name : "unknown",
+      });
     }
   }
-  return { ...ownerResult, athletesReviewed };
+  return { athletesReviewed };
 }
 
 async function reviewForUser(params: {

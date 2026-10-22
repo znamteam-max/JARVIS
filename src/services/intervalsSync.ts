@@ -17,7 +17,13 @@ import type { AthleteConnection, User } from "@/db/schema";
 import { mapIntervalsActivity, mapIntervalsWellness } from "@/domain/intervalsFitness";
 import { formatActivityCard, selectActivitiesToAnnounce } from "@/domain/stravaActivity";
 import { decryptSecret } from "@/integrations/encryption";
-import { fetchIntervals, type IntervalsCredentials } from "@/integrations/intervals";
+import { getCoachProfile, mergeCoachSettings } from "@/db/queries/coach";
+import { parseIntervalsAthlete } from "@/domain/athleteNorms";
+import {
+  fetchIntervals,
+  fetchIntervalsAthlete,
+  type IntervalsCredentials,
+} from "@/integrations/intervals";
 import { getAllowedTelegramUserIds, isIntervalsConfigured } from "@/lib/env";
 import { logger } from "@/lib/logger";
 
@@ -68,6 +74,7 @@ export async function syncAthletesIntervalsIfDue(now = new Date()) {
         credentials: athleteIntervalsCredentials(connection),
       });
       await setIntegrationSyncState(key, now, null);
+      await refreshAthleteZonesIfStale(user.id, athleteIntervalsCredentials(connection), now);
       synced += 1;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -76,6 +83,30 @@ export async function syncAthletesIntervalsIfDue(now = new Date()) {
     }
   }
   return { athletes: synced };
+}
+
+// Her threshold HR, max HR and zones from Intervals.icu, refreshed once a day for the coach.
+const ZONES_REFRESH_MS = 24 * 60 * 60 * 1000;
+
+export async function refreshAthleteZonesIfStale(
+  userId: string,
+  credentials: IntervalsCredentials,
+  now = new Date(),
+) {
+  const settings = (await getCoachProfile(userId))?.settings ?? {};
+  const cached = settings.intervals as { fetchedAt?: string } | undefined;
+  if (cached?.fetchedAt && now.getTime() - Date.parse(cached.fetchedAt) < ZONES_REFRESH_MS) return;
+  try {
+    const athlete = parseIntervalsAthlete(await fetchIntervalsAthlete(credentials));
+    await mergeCoachSettings(userId, {
+      intervals: { ...athlete, fetchedAt: now.toISOString() },
+    });
+  } catch (error) {
+    logger.warn("Athlete zones refresh failed", {
+      userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 export function athleteIntervalsCredentials(connection: AthleteConnection): IntervalsCredentials {
