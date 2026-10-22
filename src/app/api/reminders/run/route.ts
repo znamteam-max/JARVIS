@@ -1,6 +1,6 @@
 import { after, NextResponse } from "next/server";
 
-import { sendClaudeWelcomeIfDue } from "@/athleteBot/claudeWelcome";
+import { learnFromHistoryIfDue, sendClaudeWelcomeIfDue } from "@/athleteBot/claudeWelcome";
 import { runDueReminders } from "@/jobs/runDueReminders";
 import { reviewAthleteWorkoutsIfDue, reviewNewWorkoutsIfDue } from "@/services/coachReviews";
 import { backfillFoodPhotos } from "@/services/foodPhotos";
@@ -53,6 +53,14 @@ export async function POST(request: Request) {
     sendClaudeWelcomeIfDue().catch((error) =>
       logger.warn("Coach welcome tick failed", {
         error: error instanceof Error ? error.message : String(error),
+      }),
+    ),
+  );
+  // An athlete welcomed before the coach read her old chat gets one quiet pass over it.
+  after(() =>
+    learnFromHistoryIfDue().catch((error) =>
+      logger.warn("Coach history tick failed", {
+        error: error instanceof Error ? error.name : "unknown",
       }),
     ),
   );

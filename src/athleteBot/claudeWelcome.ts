@@ -36,7 +36,9 @@ const KEY = "claudeWelcome";
 const CLAIM_LEASE_MS = 10 * 60 * 1000;
 const MAX_ATTEMPTS = 3;
 // Her whole chat so far fits easily; the cap only guards a very long one.
-const WELCOME_HISTORY_MESSAGES = 200;
+const HISTORY_MESSAGES = 200;
+// The one quiet pass over the old chat, for an athlete welcomed before the coach read it.
+const HISTORY_KEY = "historyMemory";
 
 export function welcomeDue(state: WelcomeState | undefined, now: Date) {
   if (state?.sentAt) return false;
@@ -64,51 +66,63 @@ export function welcomeInstruction(params: { remembered: string | null; analyses
 ${params.analyses}`;
 }
 
-// Before writing, the coach reads everything she has written to the bot so far: what she
+// Before the coach starts, it reads everything she has written to the bot so far: what she
 // told about herself, asked for, disliked. What lasts goes to her long memory.
-export const HISTORY_INSTRUCTION = `Перед письмом прочитай всю вашу прошлую переписку (ниже, от старых сообщений к новым) и её профиль: что она рассказывала о себе, о чём просила, что ей не понравилось, как ей удобнее общаться. Раньше с ней работал более простой помощник — его советы могли противоречить её словам; опирайся на её слова и данные, а не на его выводы.
-В remember верни устойчивые факты о ней из этой переписки и профиля, которых ещё нет в «Что она рассказала о себе»: её нормы и ощущения, ограничения и здоровье, цели и старты, расписание, предпочтения в тренировках и в общении. Коротко, от третьего лица, не больше 10.
-В приветствии покажи одной-двумя фразами по делу, что ты всё это учёл (например, что знаешь её старт и как ей удобнее тренироваться). Не пересказывай переписку и не извиняйся за прошлого помощника.`;
+export const HISTORY_INSTRUCTION = `Прочитай всю вашу прошлую переписку (ниже, от старых сообщений к новым) и её профиль: что она рассказывала о себе, о чём просила, что ей не понравилось, как ей удобнее общаться. Раньше с ней работал более простой помощник — его советы могли противоречить её словам; опирайся на её слова и данные, а не на его выводы.
+В remember верни устойчивые факты о ней из этой переписки и профиля, которых ещё нет в «Что она рассказала о себе»: её нормы и ощущения, ограничения и здоровье, цели и старты, расписание, предпочтения в тренировках и в общении. Коротко, от третьего лица, не больше 10.`;
+
+const WELCOME_HISTORY_NOTE = `В приветствии покажи одной-двумя фразами по делу, что ты всё это учёл (например, что знаешь её старт и как ей удобнее тренироваться). Не пересказывай переписку и не извиняйся за прошлого помощника.`;
+
+const QUIET_HISTORY_NOTE = `Ей сейчас ничего не отправляется: ты только запоминаешь, чтобы дальше помогать ей с учётом всего этого.`;
+
+const REMEMBER_PROPERTY = { type: "array", items: { type: "string" } };
 
 const WELCOME_WITH_MEMORY_SCHEMA = {
   type: "object",
   additionalProperties: false,
   required: ["message", "remember"],
-  properties: {
-    message: { type: "string" },
-    remember: { type: "array", items: { type: "string" } },
-  },
+  properties: { message: { type: "string" }, remember: REMEMBER_PROPERTY },
 };
+
+const HISTORY_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["remember"],
+  properties: { remember: REMEMBER_PROPERTY },
+};
+
+const rememberList = z
+  .array(z.string())
+  .catch([])
+  .transform((facts) => facts.slice(0, 10));
+
+async function historyTranscript(user: User, closing: string) {
+  const messages = await listAllCoachMessages(user.id);
+  return conversationTranscript(
+    messages.slice(-HISTORY_MESSAGES),
+    user.timezone,
+    "Тренер",
+    "Спортсменка",
+    closing,
+  );
+}
 
 async function writeWelcome(user: User, now: Date, analyses: string) {
   const [first] = await listActiveMemories(user.id);
   const context = await buildCoachContext(user, now);
-  const history = conversationTranscript(
-    (await listAllCoachMessages(user.id)).slice(-WELCOME_HISTORY_MESSAGES),
-    user.timezone,
-    "Тренер",
-    "Спортсменка",
-    "Теперь напиши приветствие по инструкции.",
-  );
   const { data, model } = await askClaudeJson<unknown>({
     system: [
       { text: TRIATHLON_COACH_INSTRUCTIONS, cache: true },
       {
-        text: `${welcomeInstruction({ remembered: first?.fact ?? null, analyses })}\n\n${HISTORY_INSTRUCTION}\n\n# Данные\n${context}`,
+        text: `${welcomeInstruction({ remembered: first?.fact ?? null, analyses })}\n\n${HISTORY_INSTRUCTION}\n${WELCOME_HISTORY_NOTE}\n\n# Данные\n${context}`,
       },
     ],
-    content: history,
+    content: await historyTranscript(user, "Теперь напиши приветствие по инструкции."),
     schema: WELCOME_WITH_MEMORY_SCHEMA,
     effort: "high",
   });
   const parsed = z
-    .object({
-      message: z.string().trim().min(40),
-      remember: z
-        .array(z.string())
-        .catch([])
-        .transform((facts) => facts.slice(0, 10)),
-    })
+    .object({ message: z.string().trim().min(40), remember: rememberList })
     .parse(data);
   await applyMemoryChanges({ userId: user.id, remember: parsed.remember, forget: [] }).catch(
     () => undefined,
@@ -129,9 +143,11 @@ export async function sendClaudeWelcomeIfDue(now = new Date()) {
     try {
       const { message, model } = await writeWelcome(user, now, healthRecordsList(records));
       await sendAthleteMarkdown(user.telegramUserId, message);
-      // Sent: never again, whatever happens below.
+      // Sent: never again, whatever happens below. The welcome has read the old chat too.
+      const sentAt = new Date().toISOString();
       await mergeCoachSettings(user.id, {
-        [KEY]: { claimedAt: now.toISOString(), attempts, sentAt: new Date().toISOString() },
+        [KEY]: { claimedAt: now.toISOString(), attempts, sentAt },
+        [HISTORY_KEY]: { sentAt },
       });
       await insertCoachMessage({
         userId: user.id,
@@ -159,4 +175,51 @@ export async function sendClaudeWelcomeIfDue(now = new Date()) {
     }
   }
   return { sent: 0 };
+}
+
+// Her welcome went out before the coach could read the old chat: one quiet pass over the
+// whole history, nothing is sent to her, what it learned goes to her long memory. In this
+// state "sentAt" means "done".
+export async function learnFromHistoryIfDue(now = new Date()) {
+  if (!isAnthropicConfigured()) return { added: 0 };
+  for (const { user } of await listApprovedAthletes()) {
+    const settings = (await getCoachProfile(user.id))?.settings;
+    const welcome = settings?.[KEY] as WelcomeState | undefined;
+    const state = settings?.[HISTORY_KEY] as WelcomeState | undefined;
+    if (!welcome?.sentAt || !welcomeDue(state, now)) continue;
+    const attempts = (state?.attempts ?? 0) + 1;
+    await mergeCoachSettings(user.id, {
+      [HISTORY_KEY]: { claimedAt: now.toISOString(), attempts },
+    });
+    try {
+      const context = await buildCoachContext(user, now);
+      const { data } = await askClaudeJson<unknown>({
+        system: [
+          { text: TRIATHLON_COACH_INSTRUCTIONS, cache: true },
+          { text: `${HISTORY_INSTRUCTION}\n${QUIET_HISTORY_NOTE}\n\n# Данные\n${context}` },
+        ],
+        content: await historyTranscript(user, "Теперь верни remember по инструкции."),
+        schema: HISTORY_SCHEMA,
+        effort: "high",
+      });
+      const remember = z.object({ remember: rememberList }).parse(data).remember;
+      const { added } = await applyMemoryChanges({ userId: user.id, remember, forget: [] });
+      await mergeCoachSettings(user.id, {
+        [HISTORY_KEY]: { claimedAt: now.toISOString(), attempts, sentAt: new Date().toISOString() },
+      });
+      logger.info("Coach learned from the old chat", { userId: user.id, added });
+      return { added };
+    } catch (error) {
+      if (isClaudeUnavailable(error)) {
+        await mergeCoachSettings(user.id, { [HISTORY_KEY]: { attempts: attempts - 1 } });
+      }
+      logger.warn("Coach history pass failed", {
+        userId: user.id,
+        attempts,
+        error: error instanceof Error ? error.message.slice(0, 200) : "unknown",
+      });
+      return { added: 0 };
+    }
+  }
+  return { added: 0 };
 }
